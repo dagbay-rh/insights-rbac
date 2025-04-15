@@ -31,6 +31,7 @@ from django.shortcuts import get_object_or_404
 from django.utils.html import escape
 from internal.errors import SentryDiagnosticError, UserNotFoundError
 from internal.utils import delete_bindings
+from management.audit_log.model import AuditLog
 from management.cache import TenantCache
 from management.models import BindingMapping, Group, Permission, Principal, ResourceDefinition, Role, Workspace
 from management.principal.proxy import (
@@ -425,6 +426,9 @@ def user_lookup(request):
         )
 
     result["groups"] = user_groups
+
+    auditlog = AuditLog()
+    auditlog.log_user_lookup(request, principal)
 
     return HttpResponse(json.dumps(result, cls=DjangoJSONEncoder), content_type="application/json", status=200)
 

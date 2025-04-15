@@ -20,6 +20,7 @@ from django.db import models
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from management.group.model import Group
+from management.principal.model import Principal
 from management.role.model import Role
 
 from api.models import Tenant, TenantAwareModel
@@ -32,11 +33,13 @@ class AuditLog(TenantAwareModel):
     ROLE = "role"
     USER = "user"
     PERMISSION = "permission"
+    USER_LOOKUP = "user_lookup"
     RESOURCE_CHOICES = (
         (GROUP, "Group"),
         (ROLE, "Role"),
         (USER, "User"),
         (PERMISSION, "Permission"),
+        (USER_LOOKUP, "user_lookup"),
     )
 
     DELETE = "delete"
@@ -44,12 +47,14 @@ class AuditLog(TenantAwareModel):
     EDIT = "edit"
     CREATE = "create"
     REMOVE = "remove"
+    GET = "GET"
     ACTION_CHOICES = (
         (DELETE, "Delete"),
         (ADD, "Add"),
         (EDIT, "Edit"),
         (CREATE, "Create"),
         (REMOVE, "Remove"),
+        (GET, "Get"),
     )
 
     created = models.DateTimeField(default=timezone.now)
@@ -162,4 +167,19 @@ class AuditLog(TenantAwareModel):
 
         self.action = AuditLog.REMOVE
         self.tenant_id = self.get_tenant_id(request)
+        super(AuditLog, self).save()
+
+    def log_user_lookup(self, request, principal):
+        """Audit Log when user lookup endpoint is called."""
+        self.principal_username = request.user.username
+        self.resource_type = self.USER_LOOKUP
+        self.description = "User lookup for: " + principal.username + " performed by user: " + self.principal_username
+        self.action = AuditLog.GET
+
+        querier_tenant = Tenant.objects.get(org_id=request.user.org_id)
+        querier_principal = Principal.objects.get(username__iexact=self.principal_username, tenant=querier_tenant)
+
+        self.resource_id = querier_principal.id
+        self.tenant_id = querier_tenant.id
+
         super(AuditLog, self).save()
