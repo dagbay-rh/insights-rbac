@@ -2675,6 +2675,7 @@ def check_user_permission(
         principal, resolved_username, error = _resolve_principal(request, username, tenant)
         if error:
             return error
+        assert principal is not None and resolved_username is not None
         username = resolved_username
 
     if not tenant or not is_v2_write_activated(tenant):
@@ -2851,6 +2852,7 @@ def get_user_state(
     principal, username, error = _resolve_principal(request, username, tenant)
     if error:
         return error
+    assert principal is not None and username is not None
 
     result: dict[str, Any] = {
         "username": username,
@@ -3490,6 +3492,7 @@ def investigate_user_access(
     principal, username, error = _resolve_principal(request, username, tenant)
     if error:
         return error
+    assert principal is not None and username is not None
     is_org_admin = False
 
     # Check org admin status via BOP

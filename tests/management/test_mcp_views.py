@@ -2108,6 +2108,41 @@ class MCPCheckUserPermissionTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("error", data)
         self.assertEqual(data["error"]["code"], -32000)
 
+    @patch("management.mcp_views._list_principals_by_name")
+    def test_check_user_permission_resolves_display_name(self, mock_by_name):
+        """Positive: check_user_permission auto-resolves a display name to a username."""
+        mock_by_name.return_value = json.dumps(
+            {
+                "data": [
+                    {"username": self.test_username, "first_name": "Test", "last_name": "User"},
+                ]
+            }
+        )
+        response = self._call_tool("check_user_permission", {"username": "Test User", "permission": "rbac:roles:read"})
+
+        self.assertEqual(response.status_code, 200)
+        tool_output = self._get_tool_output(response)
+        self.assertTrue(tool_output["allowed"])
+
+    @patch("management.mcp_views._list_principals_by_name")
+    def test_check_user_permission_multiple_name_matches(self, mock_by_name):
+        """Negative: check_user_permission returns candidates when multiple users match."""
+        mock_by_name.return_value = json.dumps(
+            {
+                "data": [
+                    {"username": "user1", "first_name": "Test", "last_name": "Alpha"},
+                    {"username": "user2", "first_name": "Test", "last_name": "Beta"},
+                ]
+            }
+        )
+        response = self._call_tool("check_user_permission", {"username": "Test", "permission": "rbac:roles:read"})
+
+        self.assertEqual(response.status_code, 200)
+        tool_output = self._get_tool_output(response)
+        self.assertIn("error", tool_output)
+        self.assertIn("Multiple users match", tool_output["error"])
+        self.assertEqual(len(tool_output["candidates"]), 2)
+
 
 class MCPSearchRolesTests(MCPToolTestMixin, IdentityRequest):
     """Tests for the unified search_roles MCP tool (V1 path)."""
@@ -2916,6 +2951,45 @@ class MCPGetUserStateTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("error", tool_output)
         self.assertIn("not found", tool_output["error"])
         self.assertIn("hint", tool_output)
+
+    @patch("management.mcp_views._list_principals_by_name")
+    def test_get_user_state_resolves_display_name(self, mock_by_name):
+        """Positive: get_user_state auto-resolves a display name to a username."""
+        mock_by_name.return_value = json.dumps(
+            {
+                "data": [
+                    {"username": self.test_username, "first_name": "Test", "last_name": "User"},
+                ]
+            }
+        )
+        response = self._call_tool("get_user_state", {"username": "Test User"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+
+        self.assertNotIn("error", tool_output)
+        self.assertEqual(tool_output["username"], self.test_username)
+        self.assertIn("groups", tool_output)
+
+    @patch("management.mcp_views._list_principals_by_name")
+    def test_get_user_state_multiple_name_matches(self, mock_by_name):
+        """Negative: get_user_state returns candidates when multiple users match."""
+        mock_by_name.return_value = json.dumps(
+            {
+                "data": [
+                    {"username": "jdoe", "first_name": "John", "last_name": "Doe"},
+                    {"username": "jsmith", "first_name": "John", "last_name": "Smith"},
+                ]
+            }
+        )
+        response = self._call_tool("get_user_state", {"username": "John"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+
+        self.assertIn("error", tool_output)
+        self.assertIn("Multiple users match", tool_output["error"])
+        self.assertEqual(len(tool_output["candidates"]), 2)
 
     def test_get_user_state_without_auth_returns_error(self):
         """Permission: get_user_state without auth returns auth error."""
@@ -4685,6 +4759,47 @@ class MCPInvestigateUserAccessTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("error", tool_output)
         self.assertIn("not found", tool_output["error"])
         self.assertIn("hint", tool_output)
+
+    @patch("management.mcp_views._list_principals_by_name")
+    def test_investigate_user_access_resolves_display_name(self, mock_by_name):
+        """Positive: investigate_user_access auto-resolves a display name to a username."""
+        mock_by_name.return_value = json.dumps(
+            {
+                "data": [
+                    {"username": self.test_username, "first_name": "Sarah", "last_name": "Connor"},
+                ]
+            }
+        )
+        response = self._call_tool("investigate_user_access", {"username": "Sarah"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+
+        self.assertNotIn("error", tool_output)
+        self.assertEqual(tool_output["user"]["username"], self.test_username)
+
+    @patch("management.mcp_views._list_principals_by_name")
+    def test_investigate_user_access_multiple_name_matches(self, mock_by_name):
+        """Negative: investigate_user_access returns candidates when multiple users match a display name."""
+        mock_by_name.return_value = json.dumps(
+            {
+                "data": [
+                    {"username": "sarah1", "first_name": "Sarah", "last_name": "Connor"},
+                    {"username": "sarah2", "first_name": "Sarah", "last_name": "Smith"},
+                ]
+            }
+        )
+        response = self._call_tool("investigate_user_access", {"username": "Sarah"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+
+        self.assertIn("error", tool_output)
+        self.assertIn("Multiple users match", tool_output["error"])
+        self.assertEqual(len(tool_output["candidates"]), 2)
+        usernames = [c["username"] for c in tool_output["candidates"]]
+        self.assertIn("sarah1", usernames)
+        self.assertIn("sarah2", usernames)
 
     def test_investigate_user_access_lists_all_groups(self):
         """Positive: investigate_user_access lists all groups the user belongs to."""
