@@ -217,6 +217,7 @@ class ToolConfig:
     required_relation: str | None = None
     required_resource_type: str = "tenant"
     v1_permission: tuple[str, str] | None = None
+    caveats: str = ""
 
 
 _TOOL_CONFIG: dict[str, ToolConfig] = {}
@@ -231,6 +232,7 @@ def register_tool(
     required_relation: str | None = None,
     required_resource_type: str = "tenant",
     v1_permission: tuple[str, str] | None = None,
+    caveats: str = "",
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Register a tool with both FastMCP and _TOOL_CONFIG.
 
@@ -256,6 +258,7 @@ def register_tool(
             required_relation=required_relation,
             required_resource_type=required_resource_type,
             v1_permission=v1_permission,
+            caveats=caveats,
         )
 
         if passes_request:
@@ -435,6 +438,13 @@ def hello(message: str = "Hello, World!") -> str:
         "- 'is_org_admin' reflects the current state from the identity provider, not a historical snapshot."
     ),
     requires_auth=True,
+    caveats=(
+        "- Shows only users provisioned in this org -- does not include cross-account (TAM) users or "
+        "service accounts from other identity providers.\n"
+        "- 'is_org_admin' reflects the current state from the identity provider, not a historical snapshot.\n"
+        "- Org admins have implicit full access that bypasses all RBAC checks; "
+        "this is not reflected in the returned data."
+    ),
 )
 def list_principals(
     request: HttpRequest,
@@ -680,6 +690,13 @@ def get_status(request: HttpRequest) -> str:
         "- Wildcard permissions ('*') are expanded at access-check time, not in this listing."
     ),
     requires_auth=True,
+    caveats=(
+        "- Permissions exist independently of roles. A permission appearing here does not mean any role "
+        "grants it -- use search_roles(permission='...') to find roles that include a specific permission.\n"
+        "- Wildcard permissions ('*') are expanded at access-check time, not in this listing.\n"
+        "- Permission names are naming conventions only -- RBAC cannot confirm what UI elements "
+        "or API endpoints they control."
+    ),
 )
 def list_permissions(
     request: HttpRequest,
@@ -739,6 +756,14 @@ def list_permissions(
     requires_auth=True,
     required_relation="rbac_roles_read",
     v1_permission=("admin", "only"),
+    caveats=(
+        "- Does NOT capture: IP addresses, session IDs, login/logout events, geographic location, or "
+        "before/after state diffs. This is an activity log of RBAC changes, not a full security audit trail.\n"
+        "- No server-side date range filter. Time-bounded queries require client-side pagination through "
+        "results ordered by '-created' until entries fall outside the desired window.\n"
+        "- Cross-account request approval/denial events may not appear here -- those are tracked in the "
+        "cross-account-requests API, not the audit log."
+    ),
 )
 def list_audit_logs(
     request: HttpRequest,
@@ -972,6 +997,14 @@ def _find_authorizing_role(username: str, tenant: Any, required_perms: list[str]
     ),
     requires_auth=True,
     api_version=ApiVersion.V1,
+    caveats=(
+        "- This shows the flattened effective permissions but not the path: you cannot see which "
+        "role or group granted each permission. Use list_group_roles + list_role_access to trace "
+        "the full chain.\n"
+        "- Org admins bypass all RBAC checks; this tool returns only explicitly assigned permissions, "
+        "not their effective unlimited access.\n"
+        "- ResourceDefinition filters are stored but enforced by the consuming application, not RBAC."
+    ),
 )
 def list_access(
     request: HttpRequest,
@@ -1014,6 +1047,12 @@ def list_access(
         "names. There is no mapping from these identifiers to user-facing product names."
     ),
     requires_auth=True,
+    caveats=(
+        "- Returns values from the permission registry, not from what is actively assigned. An "
+        "application or verb may appear here even if no role in this org currently uses it.\n"
+        "- Application names are identifiers (e.g., 'cost-management', 'advisor'), not display "
+        "names. There is no mapping from these identifiers to user-facing product names."
+    ),
 )
 def list_permission_options(
     request: HttpRequest,
@@ -1058,6 +1097,12 @@ def list_permission_options(
     ),
     requires_auth=True,
     api_version=ApiVersion.V1,
+    caveats=(
+        "- Non-org-admin users cannot modify groups that contain roles with RBAC write permissions "
+        "(e.g., 'User Access administrator'). The Default admin access group cannot be modified at all.\n"
+        "- In V1, roles are assigned to groups and users are added to groups -- "
+        "roles cannot be assigned directly to users."
+    ),
 )
 def list_group_roles(
     request: HttpRequest,
@@ -1119,6 +1164,13 @@ def list_group_roles(
     ),
     requires_auth=True,
     api_version=ApiVersion.V1,
+    caveats=(
+        "- This shows what the role grants in isolation. A user's effective access is the union of "
+        "all roles across all their groups -- a missing permission here may be covered by another role.\n"
+        "- ResourceDefinition filters are stored but enforced by the consuming application, not RBAC.\n"
+        "- Permission names are naming conventions only -- RBAC cannot confirm what UI elements "
+        "or API endpoints they control."
+    ),
 )
 def list_role_access(
     request: HttpRequest,
@@ -1158,6 +1210,12 @@ def list_role_access(
     api_version=ApiVersion.UNIFIED,
     required_relation="rbac_roles_read",
     v1_permission=("role", "read"),
+    caveats=(
+        "- The permission filter finds roles containing that permission, but does not account for "
+        "ResourceDefinition filters that may narrow the permission's effective scope.\n"
+        "- Role names are not unique across V1 and V2. The org_version field indicates which API "
+        "version the result came from."
+    ),
 )
 def search_roles(
     request: HttpRequest,
@@ -1317,6 +1375,11 @@ def _get_role_v2(request: HttpRequest, role_uuid: str) -> str:
     api_version=ApiVersion.UNIFIED,
     required_relation="rbac_roles_read",
     v1_permission=("role", "read"),
+    caveats=(
+        "- Permission names are naming conventions only -- RBAC cannot confirm what UI elements "
+        "or API endpoints they control.\n"
+        "- ResourceDefinition filters are stored but enforced by the consuming application, not RBAC."
+    ),
 )
 def check_role_permissions(
     request: HttpRequest,
@@ -1606,6 +1669,13 @@ def list_groups(
         "of who was added or removed. Use list_audit_logs for membership change history."
     ),
     requires_auth=True,
+    caveats=(
+        "- The 'Default access' group is a system group that all users belong to implicitly. "
+        "Its principalCount may not reflect the full org size, and its roles define the baseline "
+        "permissions every user gets.\n"
+        "- Group membership changes are not versioned. You see the current state, not a history "
+        "of who was added or removed. Use list_audit_logs for membership change history."
+    ),
 )
 def get_group(
     request: HttpRequest,
@@ -1668,6 +1738,14 @@ def list_group_principals(
         "- Only org admins can approve or deny requests -- regular users can view but not act on them."
     ),
     requires_auth=True,
+    caveats=(
+        "- Cross-account requests are org-to-org, not user-to-user. A TAM requests access to your "
+        "entire org's resources (scoped by the roles they are granted), not to a specific user's data.\n"
+        "- Approved requests have a time window (start_date to end_date). An 'approved' request may "
+        "have expired -- check end_date against the current date to confirm active access.\n"
+        "- Cross-account activity is not tracked in RBAC audit logs.\n"
+        "- Only org admins can approve or deny requests -- regular users can view but not act on them."
+    ),
 )
 def list_cross_account_requests(
     request: HttpRequest,
@@ -2589,6 +2667,13 @@ def _permission_matches(granted_permission: str, requested_permission: str) -> b
     api_version=ApiVersion.UNIFIED,
     required_relation="rbac_roles_read",
     v1_permission=("principal", "read"),
+    caveats=(
+        "- Org admins bypass all RBAC checks; this tool returns only explicitly assigned permissions, "
+        "not their effective unlimited access.\n"
+        "- ResourceDefinition filters are stored but enforced by the consuming application, not RBAC.\n"
+        "- Permission names are naming conventions only -- RBAC cannot confirm what UI elements "
+        "or API endpoints they control."
+    ),
 )
 def check_user_permission(
     request: HttpRequest,
@@ -2767,6 +2852,12 @@ def _check_user_permission_v1(request: HttpRequest, username: str, permission: s
     api_version=ApiVersion.UNIFIED,
     required_relation="rbac_roles_read",
     v1_permission=("principal", "read"),
+    caveats=(
+        "- Org admins have implicit full access that bypasses all RBAC checks; "
+        "this is not reflected in the returned data.\n"
+        "- Permission names are naming conventions only -- RBAC cannot confirm what UI elements "
+        "or API endpoints they control."
+    ),
 )
 def get_user_state(
     request: HttpRequest,
@@ -3415,6 +3506,14 @@ def _analyze_expected_permission(
     api_version=ApiVersion.COMMON,
     required_relation="rbac_roles_read",
     v1_permission=("principal", "read"),
+    caveats=(
+        "- Org admins bypass all RBAC checks; this tool returns only explicitly assigned permissions, "
+        "not their effective unlimited access.\n"
+        "- In V1, roles are assigned to groups -- roles cannot be assigned directly to users. "
+        "In V2, roles are bound to subjects via role bindings, which can target individual users.\n"
+        "- Permission names are naming conventions only -- RBAC cannot confirm what UI elements "
+        "or API endpoints they control."
+    ),
 )
 def investigate_user_access(
     request: HttpRequest,
@@ -5243,7 +5342,13 @@ def _handle_tools_call(request: HttpRequest, request_id: Any, params: dict[str, 
             _record_metric(tool_name, "success", duration)
             logger.info("mcp: tools/call tool='%s' completed in %.3fs", tool_name, duration)
 
-        content = [{"type": "text", "text": _normalize_tool_result(result)}]
+        result_text = _normalize_tool_result(result)
+        content = [{"type": "text", "text": result_text}]
+        if config.caveats:
+            content.append(
+                {"type": "text", "text": f"IMPORTANT — INCLUDE THESE CAVEATS IN YOUR ANSWER:\n{config.caveats}"}
+            )
+
         return _success_response(request_id, {"content": content, "isError": False})
     except ToolTimeoutError:
         duration = time.monotonic() - start if track else timeout
