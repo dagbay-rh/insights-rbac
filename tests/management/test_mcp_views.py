@@ -132,26 +132,35 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("instructions", result)
         self.assertIn("RBAC", result["instructions"])
 
-    @override_settings(MCP_WRITE_ENABLED=True)
-    def test_initialize_instructions_include_suggestion_layer_when_writes_enabled(self):
-        """Positive: instructions include suggestion layer guidance when write mode is on."""
+    def test_initialize_instructions_always_include_remediation_guidance(self):
+        """Positive: instructions always include remediation guidance regardless of write mode."""
         body = {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {}}
         response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
 
         instructions = response.json()["result"]["instructions"]
-        self.assertIn("Suggestion Layer", instructions)
-        self.assertIn("numbered write-action", instructions)
+        self.assertIn("Remediation Guidance", instructions)
+        self.assertIn("Permission gaps", instructions)
+        self.assertIn("numbered options", instructions)
+
+    @override_settings(MCP_WRITE_ENABLED=True)
+    def test_initialize_instructions_include_write_actions_when_writes_enabled(self):
+        """Positive: instructions include write action prompt when write mode is on."""
+        body = {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+
+        instructions = response.json()["result"]["instructions"]
+        self.assertIn("Write Actions", instructions)
         self.assertIn("NEVER execute a write tool", instructions)
 
     @override_settings(MCP_WRITE_ENABLED=False)
-    def test_initialize_instructions_omit_suggestion_layer_when_writes_disabled(self):
-        """Negative: instructions omit suggestion layer when write mode is off."""
+    def test_initialize_instructions_omit_write_actions_when_writes_disabled(self):
+        """Negative: instructions omit write action prompt when write mode is off."""
         body = {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {}}
         response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
 
         instructions = response.json()["result"]["instructions"]
-        self.assertNotIn("Suggestion Layer", instructions)
-        self.assertNotIn("write-action", instructions)
+        self.assertNotIn("Write Actions", instructions)
+        self.assertIn("Remediation Guidance", instructions)
 
     def test_initialize_instructions_include_honest_caveats(self):
         """Positive: instructions always include cross-cutting honest caveats."""
