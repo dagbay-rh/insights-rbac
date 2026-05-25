@@ -4927,33 +4927,40 @@ _MCP_INSTRUCTIONS_HONEST_CAVEATS = (
     "accurate guidance."
 )
 
-_MCP_INSTRUCTIONS_SUGGESTION_LAYER = (
-    "\n\n## Suggestion Layer\n\n"
-    "After completing a readonly analysis, present the user with numbered write-action "
-    "options they can select from. Format suggestions as:\n\n"
-    '"Want me to: (1) <action>, or (2) <action>, or (3) <action>? '
-    "Reply 1, 2, or 3 -- or 'no'.\"\n\n"
-    "Guidelines:\n"
-    "- Always include a 'do nothing' or 'audit first' option when the action is irreversible.\n"
-    "- For permission gaps: offer to add the user to an existing group with the right role, "
-    "create a narrow custom role, or add the role to the user's current group.\n"
-    "- For group dissolution: offer immediate deletion, a transition group for stranded members, "
+_MCP_INSTRUCTIONS_REMEDIATION = (
+    "\n\n## Remediation Guidance\n\n"
+    "After completing a readonly analysis that reveals a problem (permission gap, stale membership, "
+    "unauthorized change, etc.), always suggest concrete next steps the user or an admin can take "
+    "to resolve it. Present remediation as numbered options:\n\n"
+    '"To fix this you could: (1) <action>, (2) <action>, or (3) <action>."\n\n'
+    "Scenario-specific guidance:\n"
+    "- **Permission gaps**: suggest (a) adding the user to an existing group that already has "
+    "the right role, (b) creating a narrow custom role with just the needed permissions, or "
+    "(c) adding the missing role to the user's current group.\n"
+    "- **Group dissolution**: suggest immediate deletion, a transition group for stranded members, "
     "or partial cleanup.\n"
-    "- For audit investigations: offer to remove unauthorized changes, revoke the actor's access, "
+    "- **Audit investigations**: suggest removing unauthorized changes, revoking the actor's access, "
     "or both.\n"
-    "- For offboarding: offer to remove the user from groups, generate a report, or both.\n"
-    "- For cross-account access: offer to update or cancel requests, or generate a briefing report.\n"
-    "- For review-only scenarios (e.g., summarizing recent changes): do NOT offer write actions. "
-    "Present the summary and let the user ask follow-up questions.\n"
-    "- NEVER execute a write tool without the user explicitly selecting an option."
+    "- **Offboarding**: suggest removing the user from groups, generating a report, or both.\n"
+    "- **Cross-account access**: suggest updating or cancelling requests, or generating a briefing report.\n"
+    "- **Review-only scenarios** (e.g., summarizing recent changes): do NOT suggest write actions. "
+    "Present the summary and let the user ask follow-up questions.\n\n"
+    "Always include a 'do nothing / audit first' option when the action is irreversible."
+)
+
+_MCP_INSTRUCTIONS_WRITE_ACTIONS = (
+    "\n\n## Write Actions\n\n"
+    "Write tools are enabled. When presenting remediation options, offer to execute them directly. "
+    "Format as: \"Want me to do this now? Reply 1, 2, or 3 -- or 'no'.\"\n\n"
+    "NEVER execute a write tool without the user explicitly selecting an option."
 )
 
 
 def _build_mcp_instructions() -> str:
     """Build MCP server instructions based on current feature flags."""
-    parts = [_MCP_INSTRUCTIONS_BASE, _MCP_INSTRUCTIONS_HONEST_CAVEATS]
+    parts = [_MCP_INSTRUCTIONS_BASE, _MCP_INSTRUCTIONS_HONEST_CAVEATS, _MCP_INSTRUCTIONS_REMEDIATION]
     if _is_write_enabled():
-        parts.append(_MCP_INSTRUCTIONS_SUGGESTION_LAYER)
+        parts.append(_MCP_INSTRUCTIONS_WRITE_ACTIONS)
     return "".join(parts)
 
 
