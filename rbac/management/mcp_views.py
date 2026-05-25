@@ -473,7 +473,22 @@ def list_principals(
         query_params["match_criteria"] = match_criteria
 
     path = reverse("v1_management:principals")
-    return _call_view(request, _principal_view, path, query_params)
+    result = _call_view(request, _principal_view, path, query_params)
+
+    if usernames:
+        try:
+            parsed = json.loads(result)
+            if parsed.get("meta", {}).get("count", 1) == 0:
+                parsed["hint"] = (
+                    f"No users matched the username '{usernames}'. "
+                    f"If this is a display name (e.g. first/last name), "
+                    f"retry with list_principals(name='{usernames}') to search by display name."
+                )
+                return json.dumps(parsed, default=str)
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+    return result
 
 
 def _list_principals_by_name(
