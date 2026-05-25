@@ -2669,19 +2669,25 @@ def check_user_permission(
         )
 
     tenant = getattr(request, "tenant", None)
-
-    # Resolve display name → username before V1/V2 branch
-    if tenant:
-        principal, resolved_username, error = _resolve_principal(request, username, tenant)
-        if error:
-            return error
-        assert principal is not None and resolved_username is not None
-        username = resolved_username
-
     if not tenant or not is_v2_write_activated(tenant):
+        # V1 path: resolve display name then delegate
+        if tenant:
+            _principal, resolved_username, error = _resolve_principal(request, username, tenant)
+            if error:
+                return error
+            if resolved_username:
+                username = resolved_username
         return _check_user_permission_v1(request, username, permission)
 
-    # principal is already resolved by _resolve_principal above
+    # V2 path: resolve display name → principal
+    resolved_principal, resolved_username, error = _resolve_principal(request, username, tenant)
+    if error:
+        return error
+    if not resolved_principal or not resolved_username:
+        return json.dumps({"error": f"User '{username}' not found in this organization"})
+    principal: Principal = resolved_principal
+    username = resolved_username
+
     bindings_path = reverse("v2_management:role-bindings-list")
     raw = _call_view(
         request,
@@ -2849,10 +2855,13 @@ def get_user_state(
     org_version = "v2" if is_v2 else "v1"
 
     # Resolve username or display name
-    principal, username, error = _resolve_principal(request, username, tenant)
+    resolved_principal, resolved_username, error = _resolve_principal(request, username, tenant)
     if error:
         return error
-    assert principal is not None and username is not None
+    if not resolved_principal or not resolved_username:
+        return json.dumps({"error": f"User '{username}' not found in this organization"})
+    principal: Principal = resolved_principal
+    username = resolved_username
 
     result: dict[str, Any] = {
         "username": username,
@@ -3489,10 +3498,13 @@ def investigate_user_access(
     org_version = "v2" if is_v2 else "v1"
 
     # Step 1: Resolve username or display name and get org admin status
-    principal, username, error = _resolve_principal(request, username, tenant)
+    resolved_principal, resolved_username, error = _resolve_principal(request, username, tenant)
     if error:
         return error
-    assert principal is not None and username is not None
+    if not resolved_principal or not resolved_username:
+        return json.dumps({"error": f"User '{username}' not found in this organization"})
+    principal: Principal = resolved_principal
+    username = resolved_username
     is_org_admin = False
 
     # Check org admin status via BOP
