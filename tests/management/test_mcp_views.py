@@ -602,6 +602,42 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         tool_output = json.loads(data["result"]["content"][0]["text"])
         self.assertIn("errors", tool_output)
 
+    @patch("management.mcp_views._call_view")
+    def test_tools_call_list_principals_username_not_found_hint(self, mock_call_view):
+        """Positive: list_principals includes retry hint when usernames lookup returns zero results."""
+        mock_call_view.return_value = json.dumps({"meta": {"count": 0}, "data": [], "links": {}})
+        response = self._call_tool("list_principals", {"usernames": "Joe"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["meta"]["count"], 0)
+        self.assertIn("hint", tool_output)
+        self.assertIn("Joe", tool_output["hint"])
+        self.assertIn("list_principals(name='Joe')", tool_output["hint"])
+
+    @patch("management.mcp_views._call_view")
+    def test_tools_call_list_principals_username_found_no_hint(self, mock_call_view):
+        """Positive: list_principals does NOT include hint when usernames lookup finds results."""
+        mock_call_view.return_value = json.dumps(
+            {"meta": {"count": 1}, "data": [{"username": "joe_user"}], "links": {}}
+        )
+        response = self._call_tool("list_principals", {"usernames": "joe_user"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["meta"]["count"], 1)
+        self.assertNotIn("hint", tool_output)
+
+    @patch("management.mcp_views._call_view")
+    def test_tools_call_list_principals_no_hint_without_usernames(self, mock_call_view):
+        """Positive: list_principals does NOT include hint when no usernames filter is used."""
+        mock_call_view.return_value = json.dumps({"meta": {"count": 0}, "data": [], "links": {}})
+        response = self._call_tool("list_principals", {"limit": 10})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+        self.assertNotIn("hint", tool_output)
+
     def test_tools_call_unknown_tool_returns_error(self):
         """Negative: Calling an unknown tool returns error."""
         body = {
