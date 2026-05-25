@@ -397,6 +397,68 @@ def _resolve_group_for_tool(request: HttpRequest, group_uuid: str, group_name: s
     return _resolve_group_uuid(group_uuid, group_name, tenant)
 
 
+def _resolve_principal(
+    request: HttpRequest, username_or_name: str, tenant
+) -> tuple[Principal | None, str | None, str | None]:
+    """Resolve a principal from a username or display name.
+
+    Returns (principal, resolved_username, error_json).
+    On success error_json is None; on failure principal is None.
+    When the input is a display name and exactly one user matches,
+    the principal is auto-resolved and the resolved username is returned.
+    """
+    principal = Principal.objects.filter(username=username_or_name, tenant=tenant).first()
+    if principal:
+        return principal, username_or_name, None
+
+    # Username not found -- try display name search via BOP
+    result_json = _list_principals_by_name(
+        request, username_or_name, limit=5, offset=0, sort_order="asc", status="enabled"
+    )
+    try:
+        result = json.loads(result_json)
+        matches = result.get("data", [])
+    except (json.JSONDecodeError, AttributeError):
+        matches = []
+
+    if len(matches) == 1:
+        resolved_username = matches[0].get("username")
+        if resolved_username:
+            principal = Principal.objects.filter(username=resolved_username, tenant=tenant).first()
+            if principal:
+                return principal, resolved_username, None
+
+    if len(matches) > 1:
+        candidates = [
+            {
+                "username": u.get("username"),
+                "name": f"{u.get('first_name', '')} {u.get('last_name', '')}".strip(),
+            }
+            for u in matches
+        ]
+        return (
+            None,
+            None,
+            json.dumps(
+                {
+                    "error": f"Multiple users match '{username_or_name}'. Please specify the exact username.",
+                    "candidates": candidates,
+                }
+            ),
+        )
+
+    return (
+        None,
+        None,
+        json.dumps(
+            {
+                "error": f"User '{username_or_name}' not found in this organization",
+                "hint": "Use list_principals(usernames='<partial>', match_criteria='partial') to search for the user.",
+            }
+        ),
+    )
+
+
 # --- Tool implementations ---
 
 
@@ -2607,21 +2669,18 @@ def check_user_permission(
         )
 
     tenant = getattr(request, "tenant", None)
+
+    # Resolve display name → username before V1/V2 branch
+    if tenant:
+        principal, resolved_username, error = _resolve_principal(request, username, tenant)
+        if error:
+            return error
+        username = resolved_username
+
     if not tenant or not is_v2_write_activated(tenant):
         return _check_user_permission_v1(request, username, permission)
 
-    principal = Principal.objects.filter(username=username, tenant=tenant).first()
-    if not principal:
-        return json.dumps(
-            {
-                "allowed": False,
-                "username": username,
-                "permission": permission,
-                "org_version": "v2",
-                "hint": f"User '{username}' not found in this organization.",
-            }
-        )
-
+    # principal is already resolved by _resolve_principal above
     bindings_path = reverse("v2_management:role-bindings-list")
     raw = _call_view(
         request,
@@ -2788,16 +2847,10 @@ def get_user_state(
     is_v2 = tenant and is_v2_write_activated(tenant)
     org_version = "v2" if is_v2 else "v1"
 
-    # Check if user exists
-    principal = Principal.objects.filter(username=username, tenant=tenant).first()
-    if not principal:
-        return json.dumps(
-            {
-                "error": f"User '{username}' not found in this organization",
-                "org_version": org_version,
-                "hint": "Use list_principals(usernames='<user>', match_criteria='exact') to verify the user exists.",
-            }
-        )
+    # Resolve username or display name
+    principal, username, error = _resolve_principal(request, username, tenant)
+    if error:
+        return error
 
     result: dict[str, Any] = {
         "username": username,
@@ -3433,17 +3486,11 @@ def investigate_user_access(
     is_v2 = is_v2_write_activated(tenant)
     org_version = "v2" if is_v2 else "v1"
 
-    # Step 1: Check if user exists and get org admin status
-    principal = Principal.objects.filter(username=username, tenant=tenant).first()
+    # Step 1: Resolve username or display name and get org admin status
+    principal, username, error = _resolve_principal(request, username, tenant)
+    if error:
+        return error
     is_org_admin = False
-
-    if not principal:
-        return json.dumps(
-            {
-                "error": f"User '{username}' not found in this organization",
-                "hint": "Use list_principals(usernames='<partial>', match_criteria='partial') to search for the user.",
-            }
-        )
 
     # Check org admin status via BOP
     if org_id:
@@ -4196,13 +4243,31 @@ def guide_user_access_delegation(
         try:
             principals_raw = list_principals(request, usernames=username, match_criteria="exact", limit=1)
             principals_data = json.loads(principals_raw)
+            if not principals_data.get("data"):
+                # Exact username miss -- try display name search
+                principals_raw = list_principals(request, name=username, limit=5)
+                principals_data = json.loads(principals_raw)
             if principals_data.get("data"):
-                user_data = principals_data["data"][0]
-                result["user_info"] = {
-                    "username": user_data.get("username"),
-                    "is_org_admin": user_data.get("is_org_admin", False),
-                    "is_active": user_data.get("is_active", True),
-                }
+                if len(principals_data["data"]) > 1:
+                    candidates = [
+                        {
+                            "username": u.get("username"),
+                            "name": f"{u.get('first_name', '')} {u.get('last_name', '')}".strip(),
+                        }
+                        for u in principals_data["data"]
+                    ]
+                    result["user_info"] = {
+                        "error": f"Multiple users match '{username}'. Please specify the exact username.",
+                        "candidates": candidates,
+                    }
+                else:
+                    user_data = principals_data["data"][0]
+                    username = user_data.get("username", username)
+                    result["user_info"] = {
+                        "username": username,
+                        "is_org_admin": user_data.get("is_org_admin", False),
+                        "is_active": user_data.get("is_active", True),
+                    }
             else:
                 result["user_info"] = {"error": f"User '{username}' not found"}
         except Exception as e:
