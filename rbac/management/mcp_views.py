@@ -1306,7 +1306,12 @@ def _get_role_v2(request: HttpRequest, role_uuid: str) -> str:
         "Set include_available_permissions=true to also list what permissions exist in each application "
         "that the role does NOT include. "
         "Returns: {role: {uuid, name, description, system/type}, permissions: {summary, by_application, "
-        "expanded_permissions, verbs_included, verbs_not_included}, coverage_analysis, recommendations, org_version}."
+        "expanded_permissions, verbs_included, verbs_not_included}, coverage_analysis, recommendations, org_version}. "
+        "AFTER ANALYSIS: Present numbered options: "
+        "(1) create a new group and attach the role, ready for user assignment, "
+        "(2) update the role's metadata (e.g. display_name) before assignment, "
+        "(3) add additional permissions to the role. "
+        "Format as 'Reply 1, 2, or 3 -- or no'. Do NOT execute write tools without explicit user selection."
     ),
     requires_auth=True,
     api_version=ApiVersion.UNIFIED,
@@ -1725,7 +1730,11 @@ def get_cross_account_request(
         "Set 'required_permission' to check if a specific permission is granted (e.g., "
         "'subscriptions:watch:read'). The tool will report whether that permission is present. "
         "Returns: {requests: [{request_id, status, end_date, days_remaining, requester_info, "
-        "roles: [{name, permissions: [...]}], permission_summary}], analysis}."
+        "roles: [{name, permissions: [...]}], permission_summary}], analysis}. "
+        "AFTER ANALYSIS: Present numbered options: "
+        "(1) update the cross-account request with an expanded roles list, "
+        "(2) deny the current request and ask the TAM to resubmit with the correct scope (cleaner audit trail). "
+        "Format as 'Reply 1 or 2 -- or no'. Do NOT execute write tools without explicit user selection."
     ),
     requires_auth=True,
     api_version=ApiVersion.COMMON,
@@ -1931,7 +1940,12 @@ def investigate_tam_access(
         "Set audit_days to control how far back to look in audit logs (default 30 days). "
         "Returns: {active_access: [{user_info, roles, permissions, expires, days_remaining, "
         "audit_activity: {total_actions, recent_actions, summary}}], summary: {total_users, "
-        "expiring_soon, unused_access}}."
+        "expiring_soon, unused_access}}. "
+        "AFTER ANALYSIS: Present numbered options: "
+        "(1) cancel unused cross-account access (requests with no audit log activity), "
+        "(2) format the full report for a CISO briefing, "
+        "(3) both. "
+        "Format as 'Reply 1, 2, or 3 -- or no'. Do NOT execute write tools without explicit user selection."
     ),
     requires_auth=True,
     api_version=ApiVersion.COMMON,
@@ -2146,7 +2160,12 @@ def audit_redhat_access(
         "roles: [{name, permissions}], analysis: {stranded_users, stranded_service_accounts, ...}}. "
         "STRANDED means the member is ONLY in this group plus platform_default — they'd be demoted "
         "to default access only. Service accounts with no other groups would start 403'ing. "
-        "Queries: Group, Principal, Policy, Role, Access models directly (no per-member API calls)"
+        "Queries: Group, Principal, Policy, Role, Access models directly (no per-member API calls). "
+        "AFTER ANALYSIS: Present numbered options: "
+        "(1) delete the group immediately (warn about stranded users/service accounts), "
+        "(2) create a transition group with the same roles, move stranded members, then delete the original, "
+        "(3) remove only covered users from the group, leave it intact for manual review. "
+        "Format as 'Reply 1, 2, or 3 -- or no'. Do NOT execute write tools without explicit user selection."
     ),
     requires_auth=True,
     api_version=ApiVersion.COMMON,
@@ -2997,7 +3016,9 @@ def _get_user_access_v1(request: HttpRequest, username: str) -> list[dict[str, A
         "RESPONSE FORMAT: Consolidate by actor. For each actor: '<actor>: <count> <action> actions on "
         "<resource_type> (<day of week>). <actor> holds <role name if known>.' "
         "Note patterns like 'Matches expected automation pattern' for service accounts. "
-        "Format dates as day of week (Monday, Tuesday, etc.), not ISO timestamps."
+        "Format dates as day of week (Monday, Tuesday, etc.), not ISO timestamps. "
+        "AFTER ANALYSIS: This is a review-only tool. Present the summary and let the user ask follow-up questions. "
+        "Do NOT offer write-action suggestions."
     ),
     requires_auth=True,
     required_relation="rbac_roles_read",
@@ -3383,7 +3404,12 @@ def _analyze_expected_permission(
         "RBAC is additive, so users get the most permissive access from all their memberships. "
         "Common causes: role doesn't contain the assumed permission, group doesn't have the expected role. "
         "V1 RETURNS: {user, org_version, groups: [{roles: [{permissions}]}], effective_access, analysis}. "
-        "V2 RETURNS: {user, org_version, groups, role_bindings: [{role: {permissions}}], effective_access, analysis}."
+        "V2 RETURNS: {user, org_version, groups, role_bindings: [{role: {permissions}}], effective_access, analysis}. "
+        "AFTER ANALYSIS: Present numbered remediation options: "
+        "(1) add a role containing the missing permission to the user's group, "
+        "(2) create a new custom role with the missing permission and add it to the group, "
+        "(3) do nothing -- audit the role definition first. "
+        "Format as 'Reply 1, 2, or 3 -- or no'. Do NOT execute write tools without explicit user selection."
     ),
     requires_auth=True,
     api_version=ApiVersion.COMMON,
