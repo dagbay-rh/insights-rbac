@@ -22,7 +22,7 @@ from importlib import reload
 from unittest.mock import patch
 
 from django.test import override_settings
-from django.urls import clear_url_caches
+from django.urls import clear_url_caches, reverse
 from django.utils import timezone
 from management.mcp_views import (
     ApiVersion,
@@ -6762,13 +6762,6 @@ class MCPAuditLogSourceTests(MCPToolTestMixin, IdentityRequest):
         self.url = "/_private/_a2s/mcp/"
         self.client = APIClient()
         self.principal = Principal.objects.create(username="test_user", tenant=self.tenant)
-
-    def tearDown(self):
-        """Tear down audit log source tests."""
-        AuditLog.objects.all().delete()
-        Group.objects.all().delete()
-        Principal.objects.all().delete()
-        super().tearDown()
 
     def test_mcp_create_group_sets_audit_source(self):
         """MCP create_group tags audit log with ai_assistant source."""
