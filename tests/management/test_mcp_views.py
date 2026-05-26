@@ -174,6 +174,44 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("Permission-to-UI mapping does not exist", instructions)
         self.assertIn("V1 vs V2 role assignment model", instructions)
 
+    @patch(
+        "management.principal.proxy.PrincipalProxy.request_principals",
+        return_value={
+            "status_code": 200,
+            "data": [{"username": "caveat_user", "email": "c@example.com"}],
+            "userCount": 1,
+        },
+    )
+    def test_tool_result_includes_caveats_in_separate_content_block(self, mock_request):
+        """Positive: tools with caveats append a second content block with caveat text."""
+        response = self._call_tool("list_principals", {"limit": 1})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result = response.json()["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(len(result["content"]), 2)
+
+        json.loads(result["content"][0]["text"])
+
+        caveat_block = result["content"][1]
+        self.assertEqual(caveat_block["type"], "text")
+        self.assertIn("IMPORTANT", caveat_block["text"])
+        self.assertIn("CAVEATS", caveat_block["text"])
+        self.assertIn("is_org_admin", caveat_block["text"])
+
+    def test_tool_result_without_caveats_has_single_content_block(self):
+        """Positive: tools without caveats return only one content block."""
+        response = self._call_tool("hello", {"message": "test"}, use_auth=False)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result = response.json()["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(len(result["content"]), 1)
+        self.assertEqual(result["content"][0]["type"], "text")
+
+        tool_output = json.loads(result["content"][0]["text"])
+        self.assertIn("response", tool_output)
+
     def test_notification_returns_202(self):
         """Positive: JSON-RPC notification (no id) returns 202."""
         body = {"jsonrpc": "2.0", "method": "notifications/initialized"}
@@ -339,7 +377,6 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(data["id"], 5)
         result = data["result"]
         self.assertFalse(result["isError"])
-        self.assertEqual(len(result["content"]), 1)
         self.assertEqual(result["content"][0]["type"], "text")
 
         tool_output = json.loads(result["content"][0]["text"])
@@ -347,6 +384,10 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("links", tool_output)
         self.assertEqual(len(tool_output["data"]), 1)
         self.assertEqual(tool_output["data"][0]["username"], "test_user")
+
+        self.assertEqual(len(result["content"]), 2)
+        self.assertIn("IMPORTANT", result["content"][1]["text"])
+        self.assertIn("CAVEATS", result["content"][1]["text"])
 
     @patch("management.mcp_views._principal_view")
     def test_tools_call_list_principals_non_drf_response(self, mock_principal_view):
