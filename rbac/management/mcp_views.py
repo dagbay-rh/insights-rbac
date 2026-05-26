@@ -2664,6 +2664,16 @@ def check_user_permission(
                 )
             if resolved_username:
                 username = resolved_username
+            else:
+                return json.dumps(
+                    {
+                        "allowed": False,
+                        "username": username,
+                        "permission": permission,
+                        "hint": f"User '{username}' not found in this organization. "
+                        "Use list_principals(usernames='<partial>', match_criteria='partial') to search.",
+                    }
+                )
         return _check_user_permission_v1(request, username, permission)
 
     # V2 path: resolve display name → principal
