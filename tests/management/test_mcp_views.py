@@ -2158,6 +2158,7 @@ class MCPSearchRolesTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("error", data)
         self.assertEqual(data["error"]["code"], -32000)
 
+    @override_settings(BYPASS_BOP_VERIFICATION=True)
     def test_search_roles_v1_filter_by_username(self):
         """Positive: search_roles on V1 org filters by username to show roles held by user."""
         principal = Principal.objects.create(username="role_holder", tenant=self.tenant)
