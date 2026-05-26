@@ -2158,6 +2158,31 @@ class MCPSearchRolesTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("error", data)
         self.assertEqual(data["error"]["code"], -32000)
 
+    def test_search_roles_v1_filter_by_username(self):
+        """Positive: search_roles on V1 org filters by username to show roles held by user."""
+        principal = Principal.objects.create(username="role_holder", tenant=self.tenant)
+        group = Group.objects.create(name="Test Group", tenant=self.tenant)
+        group.principals.add(principal)
+        role = Role.objects.create(name="User Role", tenant=self.tenant)
+        policy = Policy.objects.create(name="Test Policy", group=group, tenant=self.tenant)
+        policy.roles.add(role)
+
+        Role.objects.create(name="Unassigned Role", tenant=self.tenant)
+
+        response = self._call_tool("search_roles", {"username": "role_holder"})
+
+        self.assertEqual(response.status_code, 200)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["org_version"], "v1")
+        role_names = [r["name"] for r in tool_output["data"]]
+        self.assertIn("User Role", role_names)
+        self.assertNotIn("Unassigned Role", role_names)
+        self.assertNotIn("ignored_filters", tool_output)
+
+        policy.delete()
+        group.delete()
+        principal.delete()
+
 
 class MCPViewNonAdminTests(IdentityRequest):
     """Test the MCP endpoint for non-admin users via _private/_a2s/mcp/."""
@@ -2507,6 +2532,21 @@ class MCPUnifiedSearchRolesV2Tests(MCPToolTestMixin, IdentityRequest):
         role_names = [r["name"] for r in tool_output["data"]]
         self.assertIn("Host Reader", role_names)
         self.assertNotIn("Empty Role", role_names)
+
+    def test_search_roles_v2_username_ignored_with_guidance(self):
+        """Positive: search_roles on V2 org returns ignored_filters when username is provided."""
+        RoleV2.objects.create(name="V2 Role", tenant=self.tenant, type=RoleV2.Types.CUSTOM)
+        response = self._call_tool("search_roles", {"username": "jdoe"})
+
+        self.assertEqual(response.status_code, 200)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["org_version"], "v2")
+        self.assertIn("ignored_filters", tool_output)
+        self.assertIn("username", tool_output["ignored_filters"])
+        self.assertEqual(tool_output["ignored_filters"]["username"]["value"], "jdoe")
+        self.assertIn("role bindings", tool_output["ignored_filters"]["username"]["reason"])
+        self.assertIn("list_role_bindings", tool_output["ignored_filters"]["username"]["alternative"])
+        self.assertIn("jdoe", tool_output["ignored_filters"]["username"]["alternative"])
 
 
 @override_settings(BYPASS_BOP_VERIFICATION=True, V2_APIS_ENABLED=True)
