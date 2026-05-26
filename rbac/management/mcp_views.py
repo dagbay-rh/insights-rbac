@@ -217,6 +217,7 @@ class ToolConfig:
     required_relation: str | None = None
     required_resource_type: str = "tenant"
     v1_permission: tuple[str, str] | None = None
+    caveats: str = ""
 
 
 _TOOL_CONFIG: dict[str, ToolConfig] = {}
@@ -231,6 +232,7 @@ def register_tool(
     required_relation: str | None = None,
     required_resource_type: str = "tenant",
     v1_permission: tuple[str, str] | None = None,
+    caveats: str = "",
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Register a tool with both FastMCP and _TOOL_CONFIG.
 
@@ -247,6 +249,10 @@ def register_tool(
         first_param = next(iter(sig.parameters), None)
         passes_request = first_param == "request"
 
+        resolved_caveats = caveats
+        if not resolved_caveats and "Caveats:\n" in description:
+            resolved_caveats = description.split("Caveats:\n", 1)[1].strip()
+
         _TOOL_CONFIG[tool_name] = ToolConfig(
             fn=fn,
             requires_auth=requires_auth,
@@ -256,6 +262,7 @@ def register_tool(
             required_relation=required_relation,
             required_resource_type=required_resource_type,
             v1_permission=v1_permission,
+            caveats=resolved_caveats,
         )
 
         if passes_request:
@@ -304,6 +311,9 @@ def _clone_request(
     view_request.user = source.user
     view_request.tenant = getattr(source, "tenant", None)
     view_request.req_id = getattr(source, "req_id", None)
+
+    if getattr(source, "mcp_source", False):
+        view_request.mcp_source = True
 
     identity = source.META.get(RH_IDENTITY_HEADER)
     if identity:
@@ -837,6 +847,7 @@ def list_audit_logs(
                 "resource_type": e.resource_type,
                 "description": e.description,
                 "created": e.created.isoformat() if e.created else None,
+                "source": e.source,
             }
             for e in entries
         ]
@@ -880,6 +891,7 @@ def list_audit_logs(
             "resource_type": entry_resource,
             "description": entry.description,
             "created": entry.created.isoformat() if entry.created else None,
+            "source": entry.source,
             "authorized_by": auth_info,
         }
 
@@ -1355,7 +1367,11 @@ def _get_role_v2(request: HttpRequest, role_uuid: str) -> str:
         "(1) create a new group and attach the role, ready for user assignment, "
         "(2) update the role's metadata (e.g. display_name) before assignment, "
         "(3) add additional permissions to the role. "
-        "Format as 'Reply 1, 2, or 3 -- or no'. Do NOT execute write tools without explicit user selection."
+        "Format as 'Reply 1, 2, or 3 -- or no'. Do NOT execute write tools without explicit user selection.\n"
+        "Caveats:\n"
+        "- Permission names are naming conventions only -- RBAC cannot confirm what UI elements "
+        "or API endpoints they control.\n"
+        "- ResourceDefinition filters are stored but enforced by the consuming application, not RBAC."
     ),
     requires_auth=True,
     api_version=ApiVersion.UNIFIED,
@@ -2627,7 +2643,13 @@ def _permission_matches(granted_permission: str, requested_permission: str) -> b
         "Returns: {allowed: bool, username, permission, matched_permission, ...} "
         "or {allowed: false, hint: str}. "
         "V1 calls: GET /api/v1/access/?username=X&application=Y (internally). "
-        "V2 resolves: role bindings → roles → permissions (internally)."
+        "V2 resolves: role bindings → roles → permissions (internally).\n"
+        "Caveats:\n"
+        "- Org admins bypass all RBAC checks; this tool returns only explicitly assigned permissions, "
+        "not their effective unlimited access.\n"
+        "- ResourceDefinition filters are stored but enforced by the consuming application, not RBAC.\n"
+        "- Permission names are naming conventions only -- RBAC cannot confirm what UI elements "
+        "or API endpoints they control."
     ),
     requires_auth=True,
     api_version=ApiVersion.UNIFIED,
@@ -2842,7 +2864,12 @@ def _check_user_permission_v1(request: HttpRequest, username: str, permission: s
         "Audit log: <N> actions performed by user on <groups> (action types).'. "
         "Returns: {username, org_version, groups: [{name, roles, recent_activity}], "
         "access: [{permission, role_name, ...}], user_actions: {total_count, by_group, by_type, recent}, "
-        "summary: {group_count, permission_count, actions_by_user, recent_actions_on_groups}}."
+        "summary: {group_count, permission_count, actions_by_user, recent_actions_on_groups}}.\n"
+        "Caveats:\n"
+        "- Org admins have implicit full access that bypasses all RBAC checks; "
+        "this is not reflected in the returned data.\n"
+        "- Permission names are naming conventions only -- RBAC cannot confirm what UI elements "
+        "or API endpoints they control."
     ),
     requires_auth=True,
     api_version=ApiVersion.UNIFIED,
@@ -3498,7 +3525,14 @@ def _analyze_expected_permission(
         "(1) add a role containing the missing permission to the user's group, "
         "(2) create a new custom role with the missing permission and add it to the group, "
         "(3) do nothing -- audit the role definition first. "
-        "Format as 'Reply 1, 2, or 3 -- or no'. Do NOT execute write tools without explicit user selection."
+        "Format as 'Reply 1, 2, or 3 -- or no'. Do NOT execute write tools without explicit user selection.\n"
+        "Caveats:\n"
+        "- Org admins bypass all RBAC checks; this tool returns only explicitly assigned permissions, "
+        "not their effective unlimited access.\n"
+        "- In V1, roles are assigned to groups -- roles cannot be assigned directly to users. "
+        "In V2, roles are bound to subjects via role bindings, which can target individual users.\n"
+        "- Permission names are naming conventions only -- RBAC cannot confirm what UI elements "
+        "or API endpoints they control."
     ),
     requires_auth=True,
     api_version=ApiVersion.COMMON,
@@ -5312,6 +5346,9 @@ def _handle_tools_call(request: HttpRequest, request_id: Any, params: dict[str, 
             _record_metric(tool_name, "auth_error")
             return _error_response(request_id, -32000, "Authentication required")
 
+    if config.write:
+        request.mcp_source = True
+
     if config.required_relation:
         tenant = getattr(request, "tenant", None)
         if tenant and is_v2_write_activated(tenant):
@@ -5351,7 +5388,13 @@ def _handle_tools_call(request: HttpRequest, request_id: Any, params: dict[str, 
             _record_metric(tool_name, "success", duration)
             logger.info("mcp: tools/call tool='%s' completed in %.3fs", tool_name, duration)
 
-        content = [{"type": "text", "text": _normalize_tool_result(result)}]
+        result_text = _normalize_tool_result(result)
+        content = [{"type": "text", "text": result_text}]
+        if config.caveats:
+            content.append(
+                {"type": "text", "text": f"IMPORTANT — INCLUDE THESE CAVEATS IN YOUR ANSWER:\n{config.caveats}"}
+            )
+
         return _success_response(request_id, {"content": content, "isError": False})
     except ToolTimeoutError:
         duration = time.monotonic() - start if track else timeout
