@@ -377,7 +377,6 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(data["id"], 5)
         result = data["result"]
         self.assertFalse(result["isError"])
-        self.assertGreaterEqual(len(result["content"]), 1)
         self.assertEqual(result["content"][0]["type"], "text")
 
         tool_output = json.loads(result["content"][0]["text"])
