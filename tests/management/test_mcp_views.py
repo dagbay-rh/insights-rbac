@@ -2180,10 +2180,6 @@ class MCPSearchRolesTests(MCPToolTestMixin, IdentityRequest):
         self.assertNotIn("Unassigned Role", role_names)
         self.assertNotIn("ignored_filters", tool_output)
 
-        policy.delete()
-        group.delete()
-        principal.delete()
-
 
 class MCPViewNonAdminTests(IdentityRequest):
     """Test the MCP endpoint for non-admin users via _private/_a2s/mcp/."""
