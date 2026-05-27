@@ -1159,14 +1159,17 @@ def list_role_access(
         "To find which roles grant a specific permission, call "
         "search_roles(permission='<app>:<resource>:<verb>'). Accepts comma-separated permissions. "
         "To see all roles for an application, call search_roles(application='<app>'). "
+        "To find roles held by a specific user (V1 orgs only), call search_roles(username='<user>'). "
         "V2 orgs support name with '*' wildcards (e.g., name='Cost*') and resource_type filter. "
-        "V1 orgs additionally support display_name, system flag filters. "
+        "V1 orgs additionally support display_name, system flag, and username filters. "
         "Returns: {meta: {count}, links, data: [{uuid, name, description, ...}], org_version: 'v1'|'v2'}.\n"
         "Caveats:\n"
         "- The permission filter finds roles containing that permission, but does not account for "
         "ResourceDefinition filters that may narrow the permission's effective scope.\n"
         "- Role names are not unique across V1 and V2. The org_version field indicates which API "
-        "version the result came from."
+        "version the result came from.\n"
+        "- The username filter is V1-only. For V2 orgs, it is ignored and returned in ignored_filters "
+        "with guidance to use list_role_bindings instead."
     ),
     requires_auth=True,
     api_version=ApiVersion.UNIFIED,
@@ -1185,12 +1188,27 @@ def search_roles(
     system: str = "",
     resource_type: str = "",
     order_by: str = "",
+    username: str = "",
 ) -> str:
     """Search roles, auto-detecting V1/V2 and delegating to the appropriate view."""
     tenant = getattr(request, "tenant", None)
     if tenant and is_v2_write_activated(tenant):
-        return _search_roles_v2(request, limit, offset, name, resource_type, permission, order_by)
-    return _search_roles_v1(request, limit, offset, name, display_name, permission, application, system, order_by)
+        return _search_roles_v2(
+            request,
+            limit,
+            offset,
+            name,
+            resource_type,
+            permission,
+            order_by,
+            username,
+            display_name,
+            application,
+            system,
+        )
+    return _search_roles_v1(
+        request, limit, offset, name, display_name, permission, application, system, order_by, username
+    )
 
 
 def _search_roles_v1(
@@ -1203,6 +1221,7 @@ def _search_roles_v1(
     application: str,
     system: str,
     order_by: str,
+    username: str,
 ) -> str:
     """Search roles using V1 API."""
     query_params: dict[str, str] = {
@@ -1221,6 +1240,8 @@ def _search_roles_v1(
         query_params["system"] = system
     if order_by:
         query_params["order_by"] = order_by
+    if username:
+        query_params["username"] = username
 
     path = reverse("v1_management:role-list")
     raw = _call_view(request, _role_v1_list_view, path, query_params)
@@ -1237,6 +1258,10 @@ def _search_roles_v2(
     resource_type: str,
     permission: str,
     order_by: str,
+    username: str,
+    display_name: str,
+    application: str,
+    system: str,
 ) -> str:
     """Search roles using V2 API."""
     query_params: dict[str, str] = {
@@ -1256,6 +1281,46 @@ def _search_roles_v2(
     raw = _call_view(request, _role_v2_list_view, path, query_params)
     result = json.loads(raw)
     result["org_version"] = "v2"
+
+    ignored_filters: dict[str, dict[str, str]] = {}
+
+    if username:
+        ignored_filters["username"] = {
+            "value": username,
+            "reason": "V2 orgs use role bindings instead of group-based role assignment.",
+            "alternative": (
+                "Use list_role_bindings(granted_subject_type='principal', "
+                f"granted_subject_principal_user_id='{username}') to find roles bound to this user."
+            ),
+        }
+
+    if display_name:
+        ignored_filters["display_name"] = {
+            "value": display_name,
+            "reason": "V2 roles do not have a separate display_name field.",
+            "alternative": "Use the 'name' parameter instead, which supports wildcard matching (e.g., name='Cost*').",
+        }
+
+    if application:
+        ignored_filters["application"] = {
+            "value": application,
+            "reason": "V2 roles do not support filtering by application.",
+            "alternative": (
+                "Use the 'permission' parameter to filter by specific permissions "
+                "(e.g., permission='cost-management:*:*')."
+            ),
+        }
+
+    if system:
+        ignored_filters["system"] = {
+            "value": system,
+            "reason": "V2 roles use 'type' (custom/system/seeded) instead of a boolean 'system' flag.",
+            "alternative": "V2 role results include a 'type' field you can filter client-side.",
+        }
+
+    if ignored_filters:
+        result["ignored_filters"] = ignored_filters
+
     return json.dumps(result)
 
 
