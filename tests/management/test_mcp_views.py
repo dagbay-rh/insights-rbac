@@ -16,19 +16,22 @@
 #
 """Test the MCP views via _private/_a2s/ path."""
 
+import inspect
 import json
 import time
 from importlib import reload
 from unittest.mock import patch
 
 from django.test import override_settings
-from django.urls import clear_url_caches
+from django.urls import clear_url_caches, reverse
 from django.utils import timezone
 from management.mcp_views import (
     ApiVersion,
     ToolConfig,
     ToolTimeoutError,
     _TOOL_CONFIG,
+    _check_kessel_access,
+    _check_v1_access,
     _execute_with_timeout,
     _permission_matches,
 )
@@ -49,6 +52,16 @@ from rbac import urls
 
 class MCPToolTestMixin:
     """Shared helpers for calling MCP tools in tests."""
+
+    def setUp(self):
+        """Auto-mock access checks so protected tools are callable in tests."""
+        super().setUp()
+        kessel_patcher = patch("management.mcp_views._check_kessel_access", return_value=True)
+        self._kessel_mock = kessel_patcher.start()
+        self.addCleanup(kessel_patcher.stop)
+        v1_patcher = patch("management.mcp_views._check_v1_access", return_value=True)
+        self._v1_access_mock = v1_patcher.start()
+        self.addCleanup(v1_patcher.stop)
 
     def _call_tool(self, tool_name, arguments=None, use_auth=True):
         """Helper to call an MCP tool and return the parsed response."""
@@ -110,6 +123,95 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("tools", result["capabilities"])
         self.assertEqual(result["serverInfo"]["name"], "RBAC")
         self.assertIn("Mcp-Session-Id", response)
+
+    def test_initialize_returns_instructions(self):
+        """Positive: MCP initialize includes instructions field."""
+        body = {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+
+        result = response.json()["result"]
+        self.assertIn("instructions", result)
+        self.assertIn("RBAC", result["instructions"])
+
+    def test_initialize_instructions_always_include_remediation_guidance(self):
+        """Positive: instructions always include remediation guidance regardless of write mode."""
+        body = {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+
+        instructions = response.json()["result"]["instructions"]
+        self.assertIn("Remediation Guidance", instructions)
+        self.assertIn("Permission gaps", instructions)
+        self.assertIn("numbered options", instructions)
+
+    @override_settings(MCP_WRITE_ENABLED=True)
+    def test_initialize_instructions_include_write_actions_when_writes_enabled(self):
+        """Positive: instructions include write action prompt when write mode is on."""
+        body = {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+
+        instructions = response.json()["result"]["instructions"]
+        self.assertIn("Write Actions", instructions)
+        self.assertIn("NEVER execute a write tool", instructions)
+
+    @override_settings(MCP_WRITE_ENABLED=False)
+    def test_initialize_instructions_omit_write_actions_when_writes_disabled(self):
+        """Negative: instructions omit write action prompt when write mode is off."""
+        body = {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+
+        instructions = response.json()["result"]["instructions"]
+        self.assertNotIn("Write Actions", instructions)
+        self.assertIn("Remediation Guidance", instructions)
+
+    def test_initialize_instructions_include_honest_caveats(self):
+        """Positive: instructions always include cross-cutting honest caveats."""
+        body = {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+
+        instructions = response.json()["result"]["instructions"]
+        self.assertIn("Honest Caveats", instructions)
+        self.assertIn("ResourceDefinition filters are opaque", instructions)
+        self.assertIn("Org admins have implicit full access", instructions)
+        self.assertIn("Permission-to-UI mapping does not exist", instructions)
+        self.assertIn("V1 vs V2 role assignment model", instructions)
+
+    @patch(
+        "management.principal.proxy.PrincipalProxy.request_principals",
+        return_value={
+            "status_code": 200,
+            "data": [{"username": "caveat_user", "email": "c@example.com"}],
+            "userCount": 1,
+        },
+    )
+    def test_tool_result_includes_caveats_in_separate_content_block(self, mock_request):
+        """Positive: tools with caveats append a second content block with caveat text."""
+        response = self._call_tool("list_principals", {"limit": 1})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result = response.json()["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(len(result["content"]), 2)
+
+        json.loads(result["content"][0]["text"])
+
+        caveat_block = result["content"][1]
+        self.assertEqual(caveat_block["type"], "text")
+        self.assertIn("IMPORTANT", caveat_block["text"])
+        self.assertIn("CAVEATS", caveat_block["text"])
+        self.assertIn("is_org_admin", caveat_block["text"])
+
+    def test_tool_result_without_caveats_has_single_content_block(self):
+        """Positive: tools without caveats return only one content block."""
+        response = self._call_tool("hello", {"message": "test"}, use_auth=False)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result = response.json()["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(len(result["content"]), 1)
+        self.assertEqual(result["content"][0]["type"], "text")
+
+        tool_output = json.loads(result["content"][0]["text"])
+        self.assertIn("response", tool_output)
 
     def test_notification_returns_202(self):
         """Positive: JSON-RPC notification (no id) returns 202."""
@@ -276,7 +378,6 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(data["id"], 5)
         result = data["result"]
         self.assertFalse(result["isError"])
-        self.assertEqual(len(result["content"]), 1)
         self.assertEqual(result["content"][0]["type"], "text")
 
         tool_output = json.loads(result["content"][0]["text"])
@@ -284,6 +385,10 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("links", tool_output)
         self.assertEqual(len(tool_output["data"]), 1)
         self.assertEqual(tool_output["data"][0]["username"], "test_user")
+
+        self.assertEqual(len(result["content"]), 2)
+        self.assertIn("IMPORTANT", result["content"][1]["text"])
+        self.assertIn("CAVEATS", result["content"][1]["text"])
 
     @patch("management.mcp_views._principal_view")
     def test_tools_call_list_principals_non_drf_response(self, mock_principal_view):
@@ -383,6 +488,147 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
     @patch(
         "management.principal.proxy.PrincipalProxy.request_principals",
         return_value={
+            "status_code": 200,
+            "data": [
+                {"username": "jsmith", "first_name": "John", "last_name": "Smith", "email": "jsmith@example.com"},
+                {"username": "jdoe", "first_name": "Jane", "last_name": "Doe", "email": "jdoe@example.com"},
+                {
+                    "username": "rbac_user",
+                    "first_name": "RBAC",
+                    "last_name": "Normal For V2",
+                    "email": "rbac@example.com",
+                },
+            ],
+            "userCount": 3,
+        },
+    )
+    def test_tools_call_list_principals_filter_by_name_partial(self, mock_request):
+        """Positive: list_principals filters by name with partial match (e.g., 'RBAC Normal' matches 'RBAC Normal For V2')."""
+        response = self._call_tool("list_principals", {"name": "RBAC Normal"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["meta"]["count"], 1)
+        self.assertEqual(len(tool_output["data"]), 1)
+        self.assertEqual(tool_output["data"][0]["username"], "rbac_user")
+
+    @patch(
+        "management.principal.proxy.PrincipalProxy.request_principals",
+        return_value={
+            "status_code": 200,
+            "data": [
+                {"username": "jsmith", "first_name": "John", "last_name": "Smith", "email": "jsmith@example.com"},
+                {"username": "jdoe", "first_name": "Jane", "last_name": "Doe", "email": "jdoe@example.com"},
+                {"username": "asmith", "first_name": "Alice", "last_name": "Smith", "email": "asmith@example.com"},
+            ],
+            "userCount": 3,
+        },
+    )
+    def test_tools_call_list_principals_filter_by_name_multiple_matches(self, mock_request):
+        """Positive: list_principals name filter returns all matching users."""
+        response = self._call_tool("list_principals", {"name": "Smith"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["meta"]["count"], 2)
+        self.assertEqual(len(tool_output["data"]), 2)
+        usernames = [u["username"] for u in tool_output["data"]]
+        self.assertIn("jsmith", usernames)
+        self.assertIn("asmith", usernames)
+
+    @patch(
+        "management.principal.proxy.PrincipalProxy.request_principals",
+        return_value={
+            "status_code": 200,
+            "data": [
+                {"username": "jsmith", "first_name": "John", "last_name": "Smith", "email": "jsmith@example.com"},
+                {"username": "jdoe", "first_name": "Jane", "last_name": "Doe", "email": "jdoe@example.com"},
+            ],
+            "userCount": 2,
+        },
+    )
+    def test_tools_call_list_principals_filter_by_name_case_insensitive(self, mock_request):
+        """Positive: list_principals name filter is case-insensitive."""
+        response = self._call_tool("list_principals", {"name": "john smith"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["meta"]["count"], 1)
+        self.assertEqual(len(tool_output["data"]), 1)
+        self.assertEqual(tool_output["data"][0]["username"], "jsmith")
+
+    @patch(
+        "management.principal.proxy.PrincipalProxy.request_principals",
+        return_value={
+            "status_code": 200,
+            "data": [
+                {"username": "jsmith", "first_name": "John", "last_name": "Smith", "email": "jsmith@example.com"},
+            ],
+            "userCount": 1,
+        },
+    )
+    def test_tools_call_list_principals_filter_by_name_no_match(self, mock_request):
+        """Positive: list_principals returns empty when name filter has no matches."""
+        response = self._call_tool("list_principals", {"name": "NonExistent"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["meta"]["count"], 0)
+        self.assertEqual(len(tool_output["data"]), 0)
+
+    @patch(
+        "management.principal.proxy.PrincipalProxy.request_principals",
+        return_value={
+            "status_code": 200,
+            "data": [
+                {"username": "jsmith", "first_name": "John", "last_name": "Smith", "email": "jsmith@example.com"},
+                {"username": "asmith", "first_name": "Alice", "last_name": "Smith", "email": "asmith@example.com"},
+            ],
+            "userCount": 2,
+        },
+    )
+    def test_tools_call_list_principals_filter_by_name_username_only(self, mock_request):
+        """Positive: list_principals with name filter and username_only returns only usernames."""
+        response = self._call_tool("list_principals", {"name": "Smith", "username_only": "true"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["meta"]["count"], 2)
+        self.assertEqual(len(tool_output["data"]), 2)
+        for user in tool_output["data"]:
+            self.assertEqual(list(user.keys()), ["username"])
+        usernames = [u["username"] for u in tool_output["data"]]
+        self.assertIn("jsmith", usernames)
+        self.assertIn("asmith", usernames)
+
+    @patch(
+        "management.principal.proxy.PrincipalProxy.request_principals",
+        return_value={
+            "status_code": 500,
+            "errors": [{"detail": "BOP service unavailable", "status": "500", "source": "principals"}],
+        },
+    )
+    def test_tools_call_list_principals_filter_by_name_bop_error(self, mock_request):
+        """Negative: list_principals with name filter handles BOP error gracefully."""
+        response = self._call_tool("list_principals", {"name": "Smith"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+        self.assertIn("errors", tool_output)
+        self.assertEqual(tool_output["errors"][0]["detail"], "BOP service unavailable")
+
+    def test_tools_call_list_principals_name_and_usernames_conflict(self):
+        """Negative: list_principals rejects conflicting name and usernames parameters."""
+        response = self._call_tool("list_principals", {"name": "Smith", "usernames": "jsmith"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+        self.assertIn("errors", tool_output)
+        self.assertEqual(tool_output["errors"][0]["detail"], "Cannot use both 'name' and 'usernames' parameters")
+
+    @patch(
+        "management.principal.proxy.PrincipalProxy.request_principals",
+        return_value={
             "status_code": 500,
             "errors": [{"detail": "Unexpected error.", "status": "500", "source": "principals"}],
         },
@@ -406,6 +652,42 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         self.assertFalse(data["result"]["isError"])
         tool_output = json.loads(data["result"]["content"][0]["text"])
         self.assertIn("errors", tool_output)
+
+    @patch("management.mcp_views._call_view")
+    def test_tools_call_list_principals_username_not_found_hint(self, mock_call_view):
+        """Positive: list_principals includes retry hint when usernames lookup returns zero results."""
+        mock_call_view.return_value = json.dumps({"meta": {"count": 0}, "data": [], "links": {}})
+        response = self._call_tool("list_principals", {"usernames": "Joe"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["meta"]["count"], 0)
+        self.assertIn("hint", tool_output)
+        self.assertIn("Joe", tool_output["hint"])
+        self.assertIn("list_principals(name='Joe')", tool_output["hint"])
+
+    @patch("management.mcp_views._call_view")
+    def test_tools_call_list_principals_username_found_no_hint(self, mock_call_view):
+        """Positive: list_principals does NOT include hint when usernames lookup finds results."""
+        mock_call_view.return_value = json.dumps(
+            {"meta": {"count": 1}, "data": [{"username": "joe_user"}], "links": {}}
+        )
+        response = self._call_tool("list_principals", {"usernames": "joe_user"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["meta"]["count"], 1)
+        self.assertNotIn("hint", tool_output)
+
+    @patch("management.mcp_views._call_view")
+    def test_tools_call_list_principals_no_hint_without_usernames(self, mock_call_view):
+        """Positive: list_principals does NOT include hint when no usernames filter is used."""
+        mock_call_view.return_value = json.dumps({"meta": {"count": 0}, "data": [], "links": {}})
+        response = self._call_tool("list_principals", {"limit": 10})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+        self.assertNotIn("hint", tool_output)
 
     def test_tools_call_unknown_tool_returns_error(self):
         """Negative: Calling an unknown tool returns error."""
@@ -1918,6 +2200,28 @@ class MCPSearchRolesTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("error", data)
         self.assertEqual(data["error"]["code"], -32000)
 
+    @override_settings(BYPASS_BOP_VERIFICATION=True)
+    def test_search_roles_v1_filter_by_username(self):
+        """Positive: search_roles on V1 org filters by username to show roles held by user."""
+        principal = Principal.objects.create(username="role_holder", tenant=self.tenant)
+        group = Group.objects.create(name="Test Group", tenant=self.tenant)
+        group.principals.add(principal)
+        role = Role.objects.create(name="User Role", tenant=self.tenant)
+        policy = Policy.objects.create(name="Test Policy", group=group, tenant=self.tenant)
+        policy.roles.add(role)
+
+        Role.objects.create(name="Unassigned Role", tenant=self.tenant)
+
+        response = self._call_tool("search_roles", {"username": "role_holder"})
+
+        self.assertEqual(response.status_code, 200)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["org_version"], "v1")
+        role_names = [r["name"] for r in tool_output["data"]]
+        self.assertIn("User Role", role_names)
+        self.assertNotIn("Unassigned Role", role_names)
+        self.assertNotIn("ignored_filters", tool_output)
+
 
 class MCPViewNonAdminTests(IdentityRequest):
     """Test the MCP endpoint for non-admin users via _private/_a2s/mcp/."""
@@ -2267,6 +2571,21 @@ class MCPUnifiedSearchRolesV2Tests(MCPToolTestMixin, IdentityRequest):
         role_names = [r["name"] for r in tool_output["data"]]
         self.assertIn("Host Reader", role_names)
         self.assertNotIn("Empty Role", role_names)
+
+    def test_search_roles_v2_username_ignored_with_guidance(self):
+        """Positive: search_roles on V2 org returns ignored_filters when username is provided."""
+        RoleV2.objects.create(name="V2 Role", tenant=self.tenant, type=RoleV2.Types.CUSTOM)
+        response = self._call_tool("search_roles", {"username": "jdoe"})
+
+        self.assertEqual(response.status_code, 200)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["org_version"], "v2")
+        self.assertIn("ignored_filters", tool_output)
+        self.assertIn("username", tool_output["ignored_filters"])
+        self.assertEqual(tool_output["ignored_filters"]["username"]["value"], "jdoe")
+        self.assertIn("role bindings", tool_output["ignored_filters"]["username"]["reason"])
+        self.assertIn("list_role_bindings", tool_output["ignored_filters"]["username"]["alternative"])
+        self.assertIn("jdoe", tool_output["ignored_filters"]["username"]["alternative"])
 
 
 @override_settings(BYPASS_BOP_VERIFICATION=True, V2_APIS_ENABLED=True)
@@ -5080,7 +5399,7 @@ class MCPWriteGatingTests(MCPToolTestMixin, IdentityRequest):
             self.assertTrue(config.requires_auth, f"Tool '{name}' should have requires_auth=True")
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPCreateGroupTests(MCPToolTestMixin, IdentityRequest):
     """Test create_group write tool."""
 
@@ -5128,7 +5447,7 @@ class MCPCreateGroupTests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(data["error"]["code"], -32000)
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPAddPrincipalsToGroupTests(MCPToolTestMixin, IdentityRequest):
     """Test add_principals_to_group write tool."""
 
@@ -5212,7 +5531,9 @@ class MCPAddPrincipalsToGroupTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("required", output["error"].lower())
 
 
-@override_settings(MCP_WRITE_ENABLED=True, V2_APIS_ENABLED=True, ATOMIC_RETRY_DISABLED=True)
+@override_settings(
+    MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False, V2_APIS_ENABLED=True, ATOMIC_RETRY_DISABLED=True
+)
 class MCPWriteToolsV2Tests(MCPToolTestMixin, IdentityRequest):
     """Test V2 write tools (create_role, create_workspace).
 
@@ -5349,7 +5670,7 @@ class MCPWriteToolsV2Tests(MCPToolTestMixin, IdentityRequest):
         self.assertFalse(data["result"]["isError"], f"Tool returned error: {data['result']}")
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPWriteToolsV1Tests(MCPToolTestMixin, IdentityRequest):
     """Test V1-only write tools (add_roles_to_group, create_role_v1)."""
 
@@ -5410,7 +5731,7 @@ class MCPWriteToolsV1Tests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(output.get("name"), "MCP Created Role", f"Got output: {output}")
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPCrossAccountRequestTests(MCPToolTestMixin, IdentityRequest):
     """Test create_cross_account_request write tool."""
 
@@ -5842,7 +6163,7 @@ class MCPGuideUserAccessDelegationV2Tests(MCPToolTestMixin, IdentityRequest):
 # --- UPDATE tool tests ---
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPUpdateGroupTests(MCPToolTestMixin, IdentityRequest):
     """Test update_group write tool."""
 
@@ -5910,7 +6231,7 @@ class MCPUpdateGroupTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("error", output)
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPUpdateRoleV1Tests(MCPToolTestMixin, IdentityRequest):
     """Test update_role_v1 and patch_role_v1 write tools."""
 
@@ -5994,7 +6315,9 @@ class MCPUpdateRoleV1Tests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("required", output["error"].lower())
 
 
-@override_settings(MCP_WRITE_ENABLED=True, V2_APIS_ENABLED=True, ATOMIC_RETRY_DISABLED=True)
+@override_settings(
+    MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False, V2_APIS_ENABLED=True, ATOMIC_RETRY_DISABLED=True
+)
 class MCPUpdateToolsV2Tests(MCPToolTestMixin, IdentityRequest):
     """Test V2 update tools (update_role, update_role_binding, update_workspace, move_workspace)."""
 
@@ -6158,7 +6481,7 @@ class MCPUpdateToolsV2Tests(MCPToolTestMixin, IdentityRequest):
         self.assertFalse(data["result"]["isError"], f"Tool returned error: {data['result']}")
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPUpdateCrossAccountTests(MCPToolTestMixin, IdentityRequest):
     """Test update_cross_account_request and patch_cross_account_request."""
 
@@ -6237,7 +6560,7 @@ class MCPUpdateCrossAccountTests(MCPToolTestMixin, IdentityRequest):
 # --- DELETE tool tests ---
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPDeleteGroupTests(MCPToolTestMixin, IdentityRequest):
     """Test delete_group and remove_principals_from_group write tools."""
 
@@ -6339,7 +6662,7 @@ class MCPDeleteGroupTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("required", output["error"].lower())
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPDeleteRoleV1Tests(MCPToolTestMixin, IdentityRequest):
     """Test remove_roles_from_group and delete_role_v1 write tools."""
 
@@ -6412,7 +6735,9 @@ class MCPDeleteRoleV1Tests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(data["error"]["code"], -32000)
 
 
-@override_settings(MCP_WRITE_ENABLED=True, V2_APIS_ENABLED=True, ATOMIC_RETRY_DISABLED=True)
+@override_settings(
+    MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False, V2_APIS_ENABLED=True, ATOMIC_RETRY_DISABLED=True
+)
 class MCPDeleteToolsV2Tests(MCPToolTestMixin, IdentityRequest):
     """Test V2 delete tools (bulk_delete_roles, delete_workspace)."""
 
@@ -6510,3 +6835,741 @@ class MCPDeleteToolsV2Tests(MCPToolTestMixin, IdentityRequest):
         data = response.json()
         self.assertIn("error", data)
         self.assertEqual(data["error"]["code"], -32000)
+
+
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
+class MCPAuditLogSourceTests(MCPToolTestMixin, IdentityRequest):
+    """Test that MCP write tools tag audit log entries with ai_assistant source."""
+
+    def setUp(self):
+        """Set up audit log source tests."""
+        super().setUp()
+        self.url = "/_private/_a2s/mcp/"
+        self.client = APIClient()
+        self.principal = Principal.objects.create(username="test_user", tenant=self.tenant)
+
+    def test_mcp_create_group_sets_audit_source(self):
+        """MCP create_group tags audit log with ai_assistant source."""
+        response = self._call_tool("create_group", {"name": "MCP Group", "description": "via MCP"})
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["result"]["isError"])
+
+        audit_entry = AuditLog.objects.filter(
+            tenant=self.tenant, resource_type=AuditLog.GROUP, action=AuditLog.CREATE
+        ).first()
+        self.assertIsNotNone(audit_entry)
+        self.assertEqual(audit_entry.source, AuditLog.SOURCE_AI_ASSISTANT)
+
+    def test_direct_api_write_has_no_source(self):
+        """Direct API group creation does not set audit source."""
+        AuditLog.objects.create(
+            principal_username="api_user",
+            resource_type=AuditLog.GROUP,
+            action=AuditLog.CREATE,
+            description="Created group: Direct Group",
+            tenant=self.tenant,
+        )
+
+        audit_entry = AuditLog.objects.filter(tenant=self.tenant, principal_username="api_user").first()
+        self.assertIsNotNone(audit_entry)
+        self.assertIsNone(audit_entry.source)
+
+    def test_list_audit_logs_includes_source_field(self):
+        """list_audit_logs output includes source field."""
+        AuditLog.objects.create(
+            principal_username="mcp_user",
+            resource_type=AuditLog.GROUP,
+            action=AuditLog.CREATE,
+            description="Created group: MCP Group",
+            source=AuditLog.SOURCE_AI_ASSISTANT,
+            tenant=self.tenant,
+        )
+        AuditLog.objects.create(
+            principal_username="api_user",
+            resource_type=AuditLog.GROUP,
+            action=AuditLog.CREATE,
+            description="Created group: API Group",
+            tenant=self.tenant,
+        )
+
+        response = self._call_tool("list_audit_logs", {"limit": 10})
+
+        self.assertEqual(response.status_code, 200)
+        tool_output = self._get_tool_output(response)
+        entries = tool_output["data"]
+        self.assertEqual(len(entries), 2)
+
+        mcp_entry = next(e for e in entries if e["principal_username"] == "mcp_user")
+        api_entry = next(e for e in entries if e["principal_username"] == "api_user")
+
+        self.assertEqual(mcp_entry["source"], "ai_assistant")
+        self.assertIsNone(api_entry["source"])
+
+    def test_list_audit_logs_with_authorization_includes_source(self):
+        """list_audit_logs with include_authorization also includes source field."""
+        AuditLog.objects.create(
+            principal_username="mcp_user",
+            resource_type=AuditLog.GROUP,
+            action=AuditLog.CREATE,
+            description="Created group: Auth Test",
+            source=AuditLog.SOURCE_AI_ASSISTANT,
+            tenant=self.tenant,
+        )
+
+        response = self._call_tool("list_audit_logs", {"include_authorization": True})
+
+        self.assertEqual(response.status_code, 200)
+        tool_output = self._get_tool_output(response)
+        entries = tool_output["data"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["source"], "ai_assistant")
+        self.assertIn("authorized_by", entries[0])
+
+
+class MCPAccessCheckTests(MCPToolTestMixin, IdentityRequest):
+    """Test the dual-path (v1/v2) permission check for MCP tools."""
+
+    def setUp(self):
+        """Set up the access check tests."""
+        super().setUp()
+        self.url = "/_private/_a2s/mcp/"
+        self.client = APIClient()
+        self.principal = Principal.objects.create(username="test_user", tenant=self.tenant)
+
+    def tearDown(self):
+        """Tear down access check tests."""
+        AuditLog.objects.all().delete()
+        Principal.objects.all().delete()
+        super().tearDown()
+
+    # --- ToolConfig ---
+
+    def test_tool_config_has_permission_fields(self):
+        """ToolConfig includes required_relation, required_resource_type, and v1_permission."""
+        config = ToolConfig(fn=lambda: "")
+        self.assertIsNone(config.required_relation)
+        self.assertEqual(config.required_resource_type, "tenant")
+        self.assertIsNone(config.v1_permission)
+
+    def test_tool_config_with_permission_fields(self):
+        """ToolConfig accepts all permission fields."""
+        config = ToolConfig(
+            fn=lambda: "",
+            required_relation="rbac_roles_read",
+            required_resource_type="workspace",
+            v1_permission=("role", "read"),
+        )
+        self.assertEqual(config.required_relation, "rbac_roles_read")
+        self.assertEqual(config.required_resource_type, "workspace")
+        self.assertEqual(config.v1_permission, ("role", "read"))
+
+    def test_protected_tools_have_required_relation(self):
+        """All protected tools have required_relation set."""
+        expected_protected = [
+            "list_audit_logs",
+            "investigate_tam_access",
+            "audit_redhat_access",
+            "audit_group_for_dissolution",
+            "get_user_state",
+            "get_rbac_recent_changes",
+            "investigate_group_changes",
+            "guide_user_access_delegation",
+            "search_roles",
+            "get_role",
+            "check_role_permissions",
+            "investigate_user_access",
+            "check_user_permission",
+        ]
+        for tool_name in expected_protected:
+            config = _TOOL_CONFIG.get(tool_name)
+            self.assertIsNotNone(config, f"Tool '{tool_name}' not found in _TOOL_CONFIG")
+            self.assertIsNotNone(
+                config.required_relation,
+                f"Tool '{tool_name}' missing required_relation",
+            )
+
+    def test_protected_tools_have_v1_permission(self):
+        """All protected tools have v1_permission set for v1 org fallback."""
+        expected_v1_permissions = {
+            "list_audit_logs": ("admin", "only"),
+            "get_rbac_recent_changes": ("admin", "only"),
+            "search_roles": ("role", "read"),
+            "get_role": ("role", "read"),
+            "check_role_permissions": ("role", "read"),
+            "investigate_tam_access": ("role", "read"),
+            "audit_redhat_access": ("role", "read"),
+            "guide_user_access_delegation": ("role", "read"),
+            "audit_group_for_dissolution": ("group", "read"),
+            "investigate_group_changes": ("group", "read"),
+            "check_user_permission": ("principal", "read"),
+            "get_user_state": ("principal", "read"),
+            "investigate_user_access": ("principal", "read"),
+        }
+        for tool_name, expected_perm in expected_v1_permissions.items():
+            config = _TOOL_CONFIG.get(tool_name)
+            self.assertIsNotNone(config, f"Tool '{tool_name}' not found in _TOOL_CONFIG")
+            self.assertEqual(
+                config.v1_permission,
+                expected_perm,
+                f"Tool '{tool_name}' has wrong v1_permission: {config.v1_permission}",
+            )
+
+    def test_unprotected_tools_have_no_required_relation(self):
+        """View-delegated tools do not have required_relation set."""
+        unprotected = ["hello", "list_principals", "list_permissions", "list_groups", "get_group"]
+        for tool_name in unprotected:
+            config = _TOOL_CONFIG.get(tool_name)
+            if config:
+                self.assertIsNone(
+                    config.required_relation,
+                    f"Tool '{tool_name}' should not have required_relation",
+                )
+
+    # --- _check_kessel_access unit tests ---
+
+    def test_check_kessel_access_no_tenant(self):
+        """_check_kessel_access returns False when request has no tenant."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        self.assertFalse(_check_kessel_access(request, "tenant", "rbac_roles_read"))
+
+    def test_check_kessel_access_no_resource_id(self):
+        """_check_kessel_access returns False when tenant has no resource ID."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        request.tenant = self.tenant
+        with patch.object(type(self.tenant), "tenant_resource_id", return_value=None):
+            self.assertFalse(_check_kessel_access(request, "tenant", "rbac_roles_read"))
+
+    @patch("management.mcp_views.get_kessel_principal_id", return_value=None)
+    def test_check_kessel_access_no_principal_id(self, _mock_principal):
+        """_check_kessel_access returns False when principal ID cannot be resolved."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        request.tenant = self.tenant
+        self.assertFalse(_check_kessel_access(request, "tenant", "rbac_roles_read"))
+
+    @patch("management.mcp_views.get_kessel_principal_id", return_value="localhost/test_user")
+    @patch("management.mcp_views.WorkspaceInventoryAccessChecker.check_resource_access", return_value=True)
+    def test_check_kessel_access_granted(self, mock_checker, _mock_principal):
+        """_check_kessel_access returns True when Kessel grants access."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        request.tenant = self.tenant
+        self.assertTrue(_check_kessel_access(request, "tenant", "rbac_roles_read"))
+        mock_checker.assert_called_once_with(
+            resource_type="tenant",
+            resource_id=self.tenant.tenant_resource_id(),
+            principal_id="localhost/test_user",
+            relation="rbac_roles_read",
+        )
+
+    @patch("management.mcp_views.get_kessel_principal_id", return_value="localhost/test_user")
+    @patch("management.mcp_views.WorkspaceInventoryAccessChecker.check_resource_access", return_value=False)
+    def test_check_kessel_access_denied(self, mock_checker, _mock_principal):
+        """_check_kessel_access returns False when Kessel denies access."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        request.tenant = self.tenant
+        self.assertFalse(_check_kessel_access(request, "tenant", "rbac_roles_read"))
+
+    @patch("management.mcp_views.get_kessel_principal_id", side_effect=Exception("Dependency error"))
+    def test_check_kessel_access_principal_exception_fails_closed(self, _mock_principal):
+        """_check_kessel_access returns False when get_kessel_principal_id raises (fail-closed)."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        request.tenant = self.tenant
+        self.assertFalse(_check_kessel_access(request, "tenant", "rbac_roles_read"))
+
+    @patch("management.mcp_views.get_kessel_principal_id", return_value="localhost/test_user")
+    @patch(
+        "management.mcp_views.WorkspaceInventoryAccessChecker.check_resource_access",
+        side_effect=Exception("Inventory API error"),
+    )
+    def test_check_kessel_access_inventory_exception_fails_closed(self, _mock_checker, _mock_principal):
+        """_check_kessel_access returns False when check_resource_access raises (fail-closed)."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        request.tenant = self.tenant
+        self.assertFalse(_check_kessel_access(request, "tenant", "rbac_roles_read"))
+
+    # --- _check_v1_access unit tests ---
+
+    def test_check_v1_access_admin_user(self):
+        """_check_v1_access returns True for org admin regardless of permission type."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        request.user = type("User", (), {"admin": True, "access": {}})()
+        self.assertTrue(_check_v1_access(request, ("role", "read")))
+        self.assertTrue(_check_v1_access(request, ("admin", "only")))
+
+    def test_check_v1_access_admin_only_non_admin(self):
+        """_check_v1_access returns False for non-admin when admin-only is required."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        request.user = type("User", (), {"admin": False, "access": {"role": {"read": ["*"]}}})()
+        self.assertFalse(_check_v1_access(request, ("admin", "only")))
+
+    def test_check_v1_access_role_read_granted(self):
+        """_check_v1_access returns True when user has role:read access."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        request.user = type("User", (), {"admin": False, "access": {"role": {"read": ["*"]}}})()
+        self.assertTrue(_check_v1_access(request, ("role", "read")))
+
+    def test_check_v1_access_group_read_granted(self):
+        """_check_v1_access returns True when user has group:read access."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        request.user = type("User", (), {"admin": False, "access": {"group": {"read": ["*"]}}})()
+        self.assertTrue(_check_v1_access(request, ("group", "read")))
+
+    def test_check_v1_access_principal_read_granted(self):
+        """_check_v1_access returns True when user has principal:read access."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        request.user = type("User", (), {"admin": False, "access": {"principal": {"read": ["*"]}}})()
+        self.assertTrue(_check_v1_access(request, ("principal", "read")))
+
+    def test_check_v1_access_no_matching_access(self):
+        """_check_v1_access returns False when user lacks required access."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        request.user = type("User", (), {"admin": False, "access": {"group": {"read": ["*"]}}})()
+        self.assertFalse(_check_v1_access(request, ("role", "read")))
+
+    def test_check_v1_access_empty_access(self):
+        """_check_v1_access returns False when user has empty access dict."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        request.user = type("User", (), {"admin": False, "access": {}})()
+        self.assertFalse(_check_v1_access(request, ("role", "read")))
+
+    def test_check_v1_access_no_user(self):
+        """_check_v1_access returns False when request has no user."""
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/")
+        self.assertFalse(_check_v1_access(request, ("role", "read")))
+
+    # --- Integration: dual-path dispatch ---
+
+    @patch("management.mcp_views.is_v2_write_activated", return_value=True)
+    @patch("management.mcp_views._check_kessel_access", return_value=False)
+    def test_v2_org_uses_kessel_check(self, mock_kessel, _mock_v2):
+        """V2 org dispatches to Kessel check; denied when Kessel returns False."""
+        response = self._call_tool("list_audit_logs")
+
+        data = response.json()
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32003)
+        mock_kessel.assert_called_once()
+
+    @patch("management.mcp_views.is_v2_write_activated", return_value=True)
+    @patch("management.mcp_views._check_kessel_access", return_value=True)
+    def test_v2_org_kessel_granted(self, _mock_kessel, _mock_v2):
+        """V2 org dispatches to Kessel check; allowed when Kessel returns True."""
+        response = self._call_tool("list_audit_logs")
+
+        data = response.json()
+        self.assertIn("result", data)
+        self.assertFalse(data["result"]["isError"])
+
+    @patch("management.mcp_views.is_v2_write_activated", return_value=False)
+    @patch("management.mcp_views._check_v1_access", return_value=False)
+    def test_v1_org_uses_v1_check(self, mock_v1, _mock_v2):
+        """V1 org dispatches to v1 access check; denied when v1 returns False."""
+        response = self._call_tool("search_roles")
+
+        data = response.json()
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32003)
+        mock_v1.assert_called_once()
+
+    @patch("management.mcp_views.is_v2_write_activated", return_value=False)
+    @patch("management.mcp_views._check_v1_access", return_value=True)
+    def test_v1_org_v1_access_granted(self, _mock_v1, _mock_v2):
+        """V1 org dispatches to v1 access check; allowed when v1 returns True."""
+        response = self._call_tool("search_roles")
+
+        data = response.json()
+        self.assertIn("result", data)
+        self.assertFalse(data["result"]["isError"])
+
+    @patch("management.mcp_views.is_v2_write_activated", return_value=False)
+    @patch("management.mcp_views._check_v1_access", return_value=False)
+    def test_v1_org_admin_only_tool_denied(self, mock_v1, _mock_v2):
+        """V1 org with admin-only tool (list_audit_logs) denied for non-admin."""
+        response = self._call_tool("list_audit_logs")
+
+        data = response.json()
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32003)
+
+    @patch("management.mcp_views.is_v2_write_activated", return_value=False)
+    @patch("management.mcp_views._check_v1_access", return_value=True)
+    def test_v1_org_admin_only_tool_granted(self, _mock_v1, _mock_v2):
+        """V1 org with admin-only tool (list_audit_logs) granted for admin."""
+        response = self._call_tool("list_audit_logs")
+
+        data = response.json()
+        self.assertIn("result", data)
+        self.assertFalse(data["result"]["isError"])
+
+    def test_tool_without_required_relation_skips_both_checks(self):
+        """Tools without required_relation do not trigger any permission check."""
+        with (
+            patch("management.mcp_views._check_kessel_access") as mock_kessel,
+            patch("management.mcp_views._check_v1_access") as mock_v1,
+        ):
+            self._call_tool("hello", {"message": "test"})
+            mock_kessel.assert_not_called()
+            mock_v1.assert_not_called()
+
+    @patch("management.mcp_views._check_kessel_access", return_value=False)
+    @patch("management.mcp_views._check_v1_access", return_value=False)
+    def test_auth_check_runs_before_permission_check(self, _mock_v1, _mock_kessel):
+        """Auth check (org_id) runs before permission check — unauthenticated gets -32000."""
+        response = self._call_tool("list_audit_logs", use_auth=False)
+
+        data = response.json()
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32000)
+        _mock_kessel.assert_not_called()
+        _mock_v1.assert_not_called()
+
+
+class MCPWriteConfirmationSettingGuardTests(IdentityRequest):
+    """Guard: every MCPToolTestMixin subclass with MCP_WRITE_ENABLED must declare MCP_WRITE_CONFIRMATION."""
+
+    def test_all_write_enabled_classes_declare_confirmation_setting(self):
+        """Prevent regressions where a write-enabled test class forgets MCP_WRITE_CONFIRMATION."""
+        module = inspect.getmodule(MCPToolTestMixin)
+        missing = []
+        for name, cls in inspect.getmembers(module, inspect.isclass):
+            if not issubclass(cls, MCPToolTestMixin) or cls is MCPToolTestMixin:
+                continue
+            wrapper = getattr(cls, "cls_atomics", None)
+            settings_override = None
+            for decorator_data in cls.__dict__.values():
+                if hasattr(decorator_data, "__wrapped__"):
+                    break
+            overrides = getattr(cls, "_overridden_settings", None)
+            if overrides is None:
+                continue
+            if not overrides.get("MCP_WRITE_ENABLED", False):
+                continue
+            if "MCP_WRITE_CONFIRMATION" not in overrides:
+                missing.append(name)
+        self.assertEqual(
+            missing,
+            [],
+            f"These test classes have MCP_WRITE_ENABLED=True but do not explicitly set "
+            f"MCP_WRITE_CONFIRMATION (True for confirmation tests, False for others): {missing}",
+        )
+
+
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=True)
+class MCPWriteConfirmationTests(MCPToolTestMixin, IdentityRequest):
+    """Test the two-phase write confirmation system."""
+
+    def setUp(self):
+        """Set up write confirmation tests."""
+        super().setUp()
+        self.url = "/_private/_a2s/mcp/"
+        self.client = APIClient()
+        self.principal = Principal.objects.create(username="test_user", tenant=self.tenant)
+
+    def tearDown(self):
+        """Tear down write confirmation tests."""
+        Group.objects.all().delete()
+        Principal.objects.all().delete()
+        super().tearDown()
+
+    def _get_confirmation_token(self, tool_name, arguments):
+        """Call a write tool and extract the confirmation token from the response."""
+        response = self._call_tool(tool_name, arguments)
+        output = json.loads(response.json()["result"]["content"][0]["text"])
+        return output["confirmation_token"]
+
+    def test_write_tool_returns_confirmation_required(self):
+        """Write tool without confirmation_token returns confirmation prompt."""
+        response = self._call_tool("create_group", {"name": "Test Group"})
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("result", data)
+        self.assertFalse(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertTrue(output["confirmation_required"])
+        self.assertIn("confirmation_token", output)
+        self.assertIn("create a new group 'Test Group'", output["message"])
+
+    def test_write_tool_executes_with_valid_token(self):
+        """Write tool with valid confirmation_token executes the operation."""
+        token = self._get_confirmation_token("create_group", {"name": "Confirmed Group"})
+
+        response2 = self._call_tool("create_group", {"name": "Confirmed Group", "confirmation_token": token})
+
+        self.assertEqual(response2.status_code, 200)
+        data = response2.json()
+        self.assertFalse(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertEqual(output["name"], "Confirmed Group")
+
+    def test_invalid_token_rejected(self):
+        """Invalid confirmation token is rejected."""
+        response = self._call_tool("create_group", {"name": "Test Group", "confirmation_token": "invalid-token-value"})
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertIn("invalid or expired", output["error"])
+
+    def test_token_cannot_be_reused(self):
+        """Confirmation token can only be used once."""
+        token = self._get_confirmation_token("create_group", {"name": "One Time Group"})
+
+        self._call_tool("create_group", {"name": "One Time Group", "confirmation_token": token})
+
+        response3 = self._call_tool("create_group", {"name": "One Time Group", "confirmation_token": token})
+
+        data = response3.json()
+        self.assertTrue(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertIn("invalid or expired", output["error"])
+
+    def test_token_rejected_for_different_arguments(self):
+        """Token issued for one set of arguments cannot be used with different arguments."""
+        token = self._get_confirmation_token("create_group", {"name": "Group A"})
+
+        response2 = self._call_tool(
+            "create_group",
+            {"name": "Group B", "confirmation_token": token},
+        )
+
+        data = response2.json()
+        self.assertTrue(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertIn("changed since the confirmation", output["error"])
+
+    def test_token_rejected_for_different_tool(self):
+        """Token issued for one tool cannot be used for a different tool."""
+        token = self._get_confirmation_token("create_group", {"name": "Cross Tool Test"})
+
+        response2 = self._call_tool(
+            "update_group",
+            {"group_name": "Cross Tool Test", "name": "New Name", "confirmation_token": token},
+        )
+
+        data = response2.json()
+        self.assertTrue(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertIn("issued for 'create_group'", output["error"])
+
+    def test_read_tools_bypass_confirmation(self):
+        """Read-only tools execute without confirmation."""
+        response = self._call_tool("list_groups")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertNotIn("confirmation_required", output)
+
+    def test_delete_tool_confirmation_shows_destructive(self):
+        """Delete tools show DESTRUCTIVE warning in confirmation message."""
+        group = Group.objects.create(name="Delete Me", tenant=self.tenant)
+
+        response = self._call_tool("delete_group", {"group_uuid": str(group.uuid)})
+
+        data = response.json()
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertTrue(output["confirmation_required"])
+        self.assertIn("DESTRUCTIVE", output["message"])
+        self.assertIn("irreversible", output["message"])
+
+    def test_confirmation_disabled_bypasses_check(self):
+        """When MCP_WRITE_CONFIRMATION=False, write tools execute immediately."""
+        with self.settings(MCP_WRITE_CONFIRMATION=False):
+            response = self._call_tool("create_group", {"name": "Direct Group"})
+
+            data = response.json()
+            self.assertFalse(data["result"]["isError"])
+            output = json.loads(data["result"]["content"][0]["text"])
+            self.assertEqual(output["name"], "Direct Group")
+
+    @override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=True)
+    def test_initialize_includes_confirmation_instructions(self):
+        """Initialize response includes confirmation protocol instructions when enabled."""
+        body = {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {"clientInfo": {"name": "test"}}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+
+        data = response.json()
+        instructions = data["result"]["instructions"]
+        self.assertIn("Write Confirmation Protocol", instructions)
+        self.assertIn("confirmation_token", instructions)
+
+    @override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
+    def test_initialize_omits_confirmation_instructions_when_disabled(self):
+        """Initialize response omits confirmation instructions when disabled."""
+        body = {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {"clientInfo": {"name": "test"}}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+
+        data = response.json()
+        instructions = data["result"]["instructions"]
+        self.assertNotIn("Write Confirmation Protocol", instructions)
+
+    @override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=True)
+    def test_write_tool_descriptions_include_confirmation_suffix(self):
+        """Write tool descriptions include confirmation protocol instructions."""
+        body = {"jsonrpc": "2.0", "method": "tools/list", "id": 1, "params": {}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+
+        data = response.json()
+        tools = {t["name"]: t for t in data["result"]["tools"]}
+        create_group = tools["create_group"]
+        self.assertIn("Write Confirmation", create_group["description"])
+        self.assertIn("NEVER auto-confirm", create_group["description"])
+
+    @override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
+    def test_write_tool_descriptions_omit_confirmation_when_disabled(self):
+        """Write tool descriptions omit confirmation suffix when disabled."""
+        body = {"jsonrpc": "2.0", "method": "tools/list", "id": 1, "params": {}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+
+        data = response.json()
+        tools = {t["name"]: t for t in data["result"]["tools"]}
+        create_group = tools["create_group"]
+        self.assertNotIn("Write Confirmation", create_group["description"])
+
+    def test_confirmation_token_not_passed_to_tool_function(self):
+        """The confirmation_token argument is stripped before calling the tool function."""
+        import dataclasses
+        from unittest.mock import MagicMock
+
+        token = self._get_confirmation_token("create_group", {"name": "Token Strip Test"})
+        original_config = _TOOL_CONFIG["create_group"]
+        mock_fn = MagicMock(wraps=original_config.fn)
+        mock_config = dataclasses.replace(original_config, fn=mock_fn)
+
+        with patch.dict("management.mcp_views._TOOL_CONFIG", {"create_group": mock_config}):
+            response2 = self._call_tool("create_group", {"name": "Token Strip Test", "confirmation_token": token})
+
+        data = response2.json()
+        self.assertFalse(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertEqual(output["name"], "Token Strip Test")
+        mock_fn.assert_called_once()
+        _, kwargs = mock_fn.call_args
+        self.assertNotIn("confirmation_token", kwargs)
+
+    def test_token_rejected_for_different_org(self):
+        """Token issued for one org cannot be used by a different org."""
+        from base64 import b64encode
+        from json import dumps as json_dumps
+
+        token = self._get_confirmation_token("create_group", {"name": "Cross Org Test"})
+
+        other_customer = self._create_customer_data()
+        other_tenant = Tenant.objects.create(
+            tenant_name=other_customer["tenant_name"],
+            account_id=other_customer["account_id"],
+            org_id=other_customer["org_id"],
+            ready=True,
+        )
+        other_identity = self._build_identity(
+            self.user_data, other_customer["account_id"], other_customer["org_id"], True, False
+        )
+        other_header = b64encode(json_dumps(other_identity).encode("utf-8"))
+        other_headers = {"HTTP_X_RH_IDENTITY": other_header}
+
+        body = {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 1,
+            "params": {
+                "name": "create_group",
+                "arguments": {"name": "Cross Org Test", "confirmation_token": token},
+            },
+        }
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **other_headers)
+
+        data = response.json()
+        self.assertTrue(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertIn("different organization", output["error"])
+
+        other_tenant.delete()
+
+
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=True)
+class MCPWritePreviewTests(MCPToolTestMixin, IdentityRequest):
+    """Test preview message generation for different write tool categories."""
+
+    def setUp(self):
+        """Set up preview tests."""
+        super().setUp()
+        self.url = "/_private/_a2s/mcp/"
+        self.client = APIClient()
+        self.principal = Principal.objects.create(username="test_user", tenant=self.tenant)
+
+    def tearDown(self):
+        """Tear down preview tests."""
+        Group.objects.all().delete()
+        Principal.objects.all().delete()
+        super().tearDown()
+
+    def _get_preview_message(self, tool_name, arguments):
+        """Call a tool and extract the confirmation preview message."""
+        response = self._call_tool(tool_name, arguments)
+        output = json.loads(response.json()["result"]["content"][0]["text"])
+        return output["message"]
+
+    def test_create_group_preview(self):
+        """create_group shows group name in preview."""
+        msg = self._get_preview_message("create_group", {"name": "Engineering Team"})
+        self.assertIn("create a new group 'Engineering Team'", msg)
+
+    def test_add_principals_preview(self):
+        """add_principals_to_group shows principal count in preview."""
+        group = Group.objects.create(name="Team", tenant=self.tenant)
+        msg = self._get_preview_message(
+            "add_principals_to_group",
+            {"group_uuid": str(group.uuid), "principals": ["user1", "user2"]},
+        )
+        self.assertIn("2 principal(s)", msg)
+
+    def test_delete_group_preview(self):
+        """delete_group shows DESTRUCTIVE and group identifier in preview."""
+        group = Group.objects.create(name="Old Team", tenant=self.tenant)
+        msg = self._get_preview_message("delete_group", {"group_name": "Old Team"})
+        self.assertIn("DESTRUCTIVE", msg)
+        self.assertIn("Old Team", msg)
+
+    def test_update_group_preview(self):
+        """update_group shows old and new name in preview."""
+        group = Group.objects.create(name="Dev Team", tenant=self.tenant)
+        msg = self._get_preview_message(
+            "update_group",
+            {"group_name": "Dev Team", "name": "Platform Team"},
+        )
+        self.assertIn("update group 'Dev Team'", msg)
+        self.assertIn("Platform Team", msg)
