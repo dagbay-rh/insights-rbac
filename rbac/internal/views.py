@@ -2725,8 +2725,8 @@ def disaster_recovery_reconcile(request):
     try:
         dt = datetime.fromisoformat(restore_timestamp_str.replace("Z", "+00:00"))
         restore_timestamp_ms = int(dt.timestamp() * 1000)
-    except (ValueError, TypeError) as e:
-        return JsonResponse({"error": f"Invalid restore_timestamp format: {e}"}, status=400)
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "Invalid restore_timestamp format, expected ISO 8601"}, status=400)
 
     buffer_seconds = body.get("buffer_seconds", 300)
     if isinstance(buffer_seconds, bool) or not isinstance(buffer_seconds, int) or buffer_seconds < 0:
