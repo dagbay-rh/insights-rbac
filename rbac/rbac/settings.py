@@ -398,6 +398,19 @@ elif REDIS_PASSWORD:
 else:
     _redis_auth = ""
 DEFAULT_REDIS_URL = f"{_redis_scheme}://{_redis_auth}{REDIS_HOST}:{REDIS_PORT}/0"
+DJANGO_CACHE_URL = f"{_redis_scheme}://{_redis_auth}{REDIS_HOST}:{REDIS_PORT}/2"
+
+_cache_location = ENVIRONMENT.get_value("DJANGO_CACHE_BACKEND", default=DJANGO_CACHE_URL)
+if _cache_location.startswith("locmem"):
+    CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+else:
+    _cache_config: dict = {"BACKEND": "django.core.cache.backends.redis.RedisCache", "LOCATION": _cache_location}
+    if REDIS_SSL:
+        _cache_options: dict = {"ssl_cert_reqs": REDIS_SSL_CERT_REQS}
+        if REDIS_SSL_CA_CERTS:
+            _cache_options["ssl_ca_certs"] = REDIS_SSL_CA_CERTS
+        _cache_config["OPTIONS"] = _cache_options
+    CACHES = {"default": _cache_config}
 
 CELERY_BROKER_URL = ENVIRONMENT.get_value("CELERY_BROKER_URL", default=DEFAULT_REDIS_URL)
 
