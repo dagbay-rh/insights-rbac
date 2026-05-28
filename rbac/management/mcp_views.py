@@ -19,6 +19,7 @@
 
 import asyncio
 import concurrent.futures
+import hashlib
 import inspect
 import json
 import logging
@@ -31,6 +32,7 @@ from functools import lru_cache, wraps
 from typing import Any, Callable
 
 from django.conf import settings
+from django.core.cache import cache as django_cache
 from django.db.models import Count, Prefetch
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.test import RequestFactory
@@ -1201,14 +1203,17 @@ def list_role_access(
         "To find which roles grant a specific permission, call "
         "search_roles(permission='<app>:<resource>:<verb>'). Accepts comma-separated permissions. "
         "To see all roles for an application, call search_roles(application='<app>'). "
+        "To find roles held by a specific user (V1 orgs only), call search_roles(username='<user>'). "
         "V2 orgs support name with '*' wildcards (e.g., name='Cost*') and resource_type filter. "
-        "V1 orgs additionally support display_name, system flag filters. "
+        "V1 orgs additionally support display_name, system flag, and username filters. "
         "Returns: {meta: {count}, links, data: [{uuid, name, description, ...}], org_version: 'v1'|'v2'}.\n"
         "Caveats:\n"
         "- The permission filter finds roles containing that permission, but does not account for "
         "ResourceDefinition filters that may narrow the permission's effective scope.\n"
         "- Role names are not unique across V1 and V2. The org_version field indicates which API "
-        "version the result came from."
+        "version the result came from.\n"
+        "- The username filter is V1-only. For V2 orgs, it is ignored and returned in ignored_filters "
+        "with guidance to use list_role_bindings instead."
     ),
     requires_auth=True,
     api_version=ApiVersion.UNIFIED,
@@ -1227,12 +1232,27 @@ def search_roles(
     system: str = "",
     resource_type: str = "",
     order_by: str = "",
+    username: str = "",
 ) -> str:
     """Search roles, auto-detecting V1/V2 and delegating to the appropriate view."""
     tenant = getattr(request, "tenant", None)
     if tenant and is_v2_write_activated(tenant):
-        return _search_roles_v2(request, limit, offset, name, resource_type, permission, order_by)
-    return _search_roles_v1(request, limit, offset, name, display_name, permission, application, system, order_by)
+        return _search_roles_v2(
+            request,
+            limit,
+            offset,
+            name,
+            resource_type,
+            permission,
+            order_by,
+            username,
+            display_name,
+            application,
+            system,
+        )
+    return _search_roles_v1(
+        request, limit, offset, name, display_name, permission, application, system, order_by, username
+    )
 
 
 def _search_roles_v1(
@@ -1245,6 +1265,7 @@ def _search_roles_v1(
     application: str,
     system: str,
     order_by: str,
+    username: str,
 ) -> str:
     """Search roles using V1 API."""
     query_params: dict[str, str] = {
@@ -1263,6 +1284,8 @@ def _search_roles_v1(
         query_params["system"] = system
     if order_by:
         query_params["order_by"] = order_by
+    if username:
+        query_params["username"] = username
 
     path = reverse("v1_management:role-list")
     raw = _call_view(request, _role_v1_list_view, path, query_params)
@@ -1279,6 +1302,10 @@ def _search_roles_v2(
     resource_type: str,
     permission: str,
     order_by: str,
+    username: str,
+    display_name: str,
+    application: str,
+    system: str,
 ) -> str:
     """Search roles using V2 API."""
     query_params: dict[str, str] = {
@@ -1298,6 +1325,46 @@ def _search_roles_v2(
     raw = _call_view(request, _role_v2_list_view, path, query_params)
     result = json.loads(raw)
     result["org_version"] = "v2"
+
+    ignored_filters: dict[str, dict[str, str]] = {}
+
+    if username:
+        ignored_filters["username"] = {
+            "value": username,
+            "reason": "V2 orgs use role bindings instead of group-based role assignment.",
+            "alternative": (
+                "Use list_role_bindings(granted_subject_type='principal', "
+                f"granted_subject_principal_user_id='{username}') to find roles bound to this user."
+            ),
+        }
+
+    if display_name:
+        ignored_filters["display_name"] = {
+            "value": display_name,
+            "reason": "V2 roles do not have a separate display_name field.",
+            "alternative": "Use the 'name' parameter instead, which supports wildcard matching (e.g., name='Cost*').",
+        }
+
+    if application:
+        ignored_filters["application"] = {
+            "value": application,
+            "reason": "V2 roles do not support filtering by application.",
+            "alternative": (
+                "Use the 'permission' parameter to filter by specific permissions "
+                "(e.g., permission='cost-management:*:*')."
+            ),
+        }
+
+    if system:
+        ignored_filters["system"] = {
+            "value": system,
+            "reason": "V2 roles use 'type' (custom/system/seeded) instead of a boolean 'system' flag.",
+            "alternative": "V2 role results include a 'type' field you can filter client-side.",
+        }
+
+    if ignored_filters:
+        result["ignored_filters"] = ignored_filters
+
     return json.dumps(result)
 
 
@@ -5123,12 +5190,39 @@ _MCP_INSTRUCTIONS_WRITE_ACTIONS = (
     "NEVER execute a write tool without the user explicitly selecting an option."
 )
 
+_MCP_INSTRUCTIONS_CONFIRMATION_PROTOCOL = (
+    "\n\n## Write Confirmation Protocol\n\n"
+    "All write operations (create, update, delete) require two-phase confirmation:\n\n"
+    "1. **First call**: Call the write tool with the desired arguments. The server returns a "
+    "confirmation message describing the action and a confirmation_token.\n"
+    "2. **Present to user**: Show the confirmation message to the user and ask for approval.\n"
+    "3. **Second call**: If the user approves, call the same tool again with the exact same "
+    'arguments plus confirmation_token="<token>".\n\n'
+    "Important:\n"
+    "- NEVER skip the confirmation step or auto-confirm on behalf of the user.\n"
+    "- If the user declines, do NOT call the tool again.\n"
+    "- Tokens expire after {ttl_display} -- if expired, repeat the first call to get a new token.\n"
+    "- The arguments in the second call must exactly match the first call."
+)
+
+_TOOL_DESCRIPTION_CONFIRMATION_SUFFIX = (
+    "\n\nWrite Confirmation: This tool requires user approval. "
+    "The first call returns a preview and confirmation_token. "
+    "Present the preview to the user. If approved, call again with the same arguments "
+    "plus confirmation_token. NEVER auto-confirm."
+)
+
 
 def _build_mcp_instructions() -> str:
     """Build MCP server instructions based on current feature flags."""
     parts = [_MCP_INSTRUCTIONS_BASE, _MCP_INSTRUCTIONS_HONEST_CAVEATS, _MCP_INSTRUCTIONS_REMEDIATION]
     if _is_write_enabled():
         parts.append(_MCP_INSTRUCTIONS_WRITE_ACTIONS)
+        if _is_write_confirmation_enabled():
+            ttl = getattr(settings, "MCP_WRITE_CONFIRMATION_TTL", _CONFIRM_TTL_DEFAULT)
+            ttl_minutes = max(1, ttl // 60)
+            ttl_display = f"{ttl_minutes} minute{'s' if ttl_minutes != 1 else ''}"
+            parts.append(_MCP_INSTRUCTIONS_CONFIRMATION_PROTOCOL.format(ttl_display=ttl_display))
     return "".join(parts)
 
 
@@ -5173,6 +5267,117 @@ def _is_write_enabled() -> bool:
     return getattr(settings, "MCP_WRITE_ENABLED", False)
 
 
+def _is_write_confirmation_enabled() -> bool:
+    """Check whether write tools require user confirmation before executing."""
+    return getattr(settings, "MCP_WRITE_CONFIRMATION", True)
+
+
+# --- Write confirmation token system ---
+
+_CONFIRM_CACHE_PREFIX = "mcp:confirm:"
+_CONFIRM_TTL_DEFAULT = 300
+
+
+def _hash_arguments(tool_name: str, arguments: dict[str, Any]) -> str:
+    """Create a stable hash of tool name + arguments for token validation."""
+    payload = json.dumps({"tool": tool_name, "args": arguments}, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _generate_confirmation_token(tool_name: str, arguments: dict[str, Any], org_id: str | None) -> str:
+    """Generate a single-use confirmation token and store it in the Django cache."""
+    token = uuid.uuid4().hex
+    args_hash = _hash_arguments(tool_name, arguments)
+    ttl = getattr(settings, "MCP_WRITE_CONFIRMATION_TTL", _CONFIRM_TTL_DEFAULT)
+    value = {"tool": tool_name, "args_hash": args_hash, "org_id": org_id or ""}
+    django_cache.set(f"{_CONFIRM_CACHE_PREFIX}{token}", value, timeout=ttl)
+    return token
+
+
+def _validate_confirmation_token(
+    token: str, tool_name: str, arguments: dict[str, Any], org_id: str | None
+) -> tuple[bool, str]:
+    """Validate and consume a confirmation token. Returns (valid, error_message)."""
+    key = f"{_CONFIRM_CACHE_PREFIX}{token}"
+    stored = django_cache.get(key)
+    if not stored:
+        return False, "Confirmation token is invalid or expired. Please retry the operation."
+
+    if stored["tool"] != tool_name:
+        return False, f"Token was issued for '{stored['tool']}', not '{tool_name}'."
+    expected_hash = _hash_arguments(tool_name, arguments)
+    if stored["args_hash"] != expected_hash:
+        return False, "Arguments have changed since the confirmation was issued. Please retry."
+    if stored["org_id"] != (org_id or ""):
+        return False, "Token was issued for a different organization."
+
+    django_cache.delete(key)
+    return True, ""
+
+
+def _generate_write_preview(tool_name: str, arguments: dict[str, Any]) -> str:
+    """Generate a human-readable one-liner summary of a write operation."""
+    name = arguments.get("name", "")
+    group_name = arguments.get("group_name", "")
+    group_uuid = arguments.get("group_uuid", "")
+    group_ref = group_name or group_uuid or ""
+    role_uuid = arguments.get("role_uuid", "")
+    workspace_id = arguments.get("workspace_id", arguments.get("workspace_uuid", ""))
+
+    if tool_name == "create_group":
+        return f"This will create a new group '{name}'."
+    if tool_name == "add_principals_to_group":
+        principals = arguments.get("principals") or []
+        return f"This will add {len(principals)} principal(s) to group '{group_ref}'."
+    if tool_name == "add_roles_to_group":
+        roles = arguments.get("roles") or []
+        return f"This will assign {len(roles)} role(s) to group '{group_ref}'."
+    if tool_name in ("create_role_v1", "create_role"):
+        return f"This will create a new role '{name}'."
+    if tool_name == "create_role_bindings":
+        bindings = arguments.get("bindings") or []
+        return f"This will create {len(bindings)} role binding(s)."
+    if tool_name == "create_workspace":
+        return f"This will create a new workspace '{name}'."
+    if tool_name == "create_cross_account_request":
+        target = arguments.get("target_org", "")
+        return f"This will create a cross-account access request to org '{target}'."
+    if tool_name == "update_group":
+        return f"This will update group '{group_ref}' (name -> '{name}')."
+    if tool_name in ("update_role_v1", "update_role"):
+        return f"This will replace role '{role_uuid}' with new definition (name: '{name}')."
+    if tool_name == "patch_role_v1":
+        return f"This will partially update role '{role_uuid}'."
+    if tool_name == "update_role_binding":
+        subject = arguments.get("subject_id", "")
+        return f"This will replace role bindings for subject '{subject}'."
+    if tool_name in ("update_workspace", "move_workspace"):
+        action = "update" if tool_name == "update_workspace" else "move"
+        return f"This will {action} workspace '{workspace_id}'."
+    if tool_name in ("update_cross_account_request", "patch_cross_account_request"):
+        req_id = arguments.get("request_id", "")
+        return f"This will update cross-account request '{req_id}'."
+    if tool_name == "delete_group":
+        return f"DESTRUCTIVE: This will permanently delete group '{group_ref}'. This is irreversible."
+    if tool_name == "remove_principals_from_group":
+        users = arguments.get("usernames", "")
+        svc = arguments.get("service_accounts", "")
+        who = users or svc or "specified principals"
+        return f"DESTRUCTIVE: This will remove {who} from group '{group_ref}'. This is irreversible."
+    if tool_name == "remove_roles_from_group":
+        return f"DESTRUCTIVE: This will remove role(s) from group '{group_ref}'. This is irreversible."
+    if tool_name == "delete_role_v1":
+        return f"DESTRUCTIVE: This will permanently delete role '{role_uuid}'. This is irreversible."
+    if tool_name == "bulk_delete_roles":
+        ids = arguments.get("ids") or []
+        return f"DESTRUCTIVE: This will permanently delete {len(ids)} role(s). This is irreversible."
+    if tool_name == "delete_workspace":
+        ws = arguments.get("workspace_uuid", "")
+        return f"DESTRUCTIVE: This will permanently delete workspace '{ws}'. This is irreversible."
+
+    return f"This will execute write operation '{tool_name}'."
+
+
 def _handle_tools_list(request: HttpRequest, request_id: Any, params: dict[str, Any]) -> JsonResponse:
     """Handle MCP tools/list request using FastMCP's registered tools."""
     v2_available = _is_v2_available()
@@ -5186,6 +5391,8 @@ def _handle_tools_list(request: HttpRequest, request_id: Any, params: dict[str, 
         description = overrides.get(tool.name, tool.description or "")
         if config.write and not write_enabled:
             description = f"[DISABLED -- write mode off] {description}"
+        elif config.write and write_enabled and _is_write_confirmation_enabled():
+            description = f"{description}{_TOOL_DESCRIPTION_CONFIRMATION_SUFFIX}"
         tools_data.append(
             {
                 "name": tool.name,
@@ -5366,6 +5573,32 @@ def _handle_tools_call(request: HttpRequest, request_id: Any, params: dict[str, 
             )
             _record_metric(tool_name, "permission_denied")
             return _error_response(request_id, -32003, "Permission denied")
+
+    confirmation_token = arguments.pop("confirmation_token", None)
+
+    if config.write and _is_write_confirmation_enabled():
+        if confirmation_token:
+            valid, error_msg = _validate_confirmation_token(confirmation_token, tool_name, arguments, org_id)
+            if not valid:
+                logger.warning("mcp: tools/call tool='%s' confirmation failed: %s", tool_name, error_msg)
+                _record_metric(tool_name, "confirmation_failed")
+                content = [{"type": "text", "text": json.dumps({"error": error_msg})}]
+                return _success_response(request_id, {"content": content, "isError": True})
+            logger.info("mcp: tools/call tool='%s' confirmed, executing", tool_name)
+        else:
+            token = _generate_confirmation_token(tool_name, arguments, org_id)
+            preview = _generate_write_preview(tool_name, arguments)
+            logger.info("mcp: tools/call tool='%s' awaiting confirmation, token issued", tool_name)
+            _record_metric(tool_name, "confirmation_pending")
+            content = [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {"confirmation_required": True, "message": preview, "confirmation_token": token}
+                    ),
+                }
+            ]
+            return _success_response(request_id, {"content": content, "isError": False})
 
     track = tool_name != "hello"
     start = time.monotonic() if track else 0

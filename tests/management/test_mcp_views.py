@@ -16,6 +16,7 @@
 #
 """Test the MCP views via _private/_a2s/ path."""
 
+import inspect
 import json
 import time
 from importlib import reload
@@ -2234,6 +2235,28 @@ class MCPSearchRolesTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("error", data)
         self.assertEqual(data["error"]["code"], -32000)
 
+    @override_settings(BYPASS_BOP_VERIFICATION=True)
+    def test_search_roles_v1_filter_by_username(self):
+        """Positive: search_roles on V1 org filters by username to show roles held by user."""
+        principal = Principal.objects.create(username="role_holder", tenant=self.tenant)
+        group = Group.objects.create(name="Test Group", tenant=self.tenant)
+        group.principals.add(principal)
+        role = Role.objects.create(name="User Role", tenant=self.tenant)
+        policy = Policy.objects.create(name="Test Policy", group=group, tenant=self.tenant)
+        policy.roles.add(role)
+
+        Role.objects.create(name="Unassigned Role", tenant=self.tenant)
+
+        response = self._call_tool("search_roles", {"username": "role_holder"})
+
+        self.assertEqual(response.status_code, 200)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["org_version"], "v1")
+        role_names = [r["name"] for r in tool_output["data"]]
+        self.assertIn("User Role", role_names)
+        self.assertNotIn("Unassigned Role", role_names)
+        self.assertNotIn("ignored_filters", tool_output)
+
 
 class MCPViewNonAdminTests(IdentityRequest):
     """Test the MCP endpoint for non-admin users via _private/_a2s/mcp/."""
@@ -2583,6 +2606,21 @@ class MCPUnifiedSearchRolesV2Tests(MCPToolTestMixin, IdentityRequest):
         role_names = [r["name"] for r in tool_output["data"]]
         self.assertIn("Host Reader", role_names)
         self.assertNotIn("Empty Role", role_names)
+
+    def test_search_roles_v2_username_ignored_with_guidance(self):
+        """Positive: search_roles on V2 org returns ignored_filters when username is provided."""
+        RoleV2.objects.create(name="V2 Role", tenant=self.tenant, type=RoleV2.Types.CUSTOM)
+        response = self._call_tool("search_roles", {"username": "jdoe"})
+
+        self.assertEqual(response.status_code, 200)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["org_version"], "v2")
+        self.assertIn("ignored_filters", tool_output)
+        self.assertIn("username", tool_output["ignored_filters"])
+        self.assertEqual(tool_output["ignored_filters"]["username"]["value"], "jdoe")
+        self.assertIn("role bindings", tool_output["ignored_filters"]["username"]["reason"])
+        self.assertIn("list_role_bindings", tool_output["ignored_filters"]["username"]["alternative"])
+        self.assertIn("jdoe", tool_output["ignored_filters"]["username"]["alternative"])
 
 
 @override_settings(BYPASS_BOP_VERIFICATION=True, V2_APIS_ENABLED=True)
@@ -5476,7 +5514,7 @@ class MCPWriteGatingTests(MCPToolTestMixin, IdentityRequest):
             self.assertTrue(config.requires_auth, f"Tool '{name}' should have requires_auth=True")
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPCreateGroupTests(MCPToolTestMixin, IdentityRequest):
     """Test create_group write tool."""
 
@@ -5524,7 +5562,7 @@ class MCPCreateGroupTests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(data["error"]["code"], -32000)
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPAddPrincipalsToGroupTests(MCPToolTestMixin, IdentityRequest):
     """Test add_principals_to_group write tool."""
 
@@ -5608,7 +5646,9 @@ class MCPAddPrincipalsToGroupTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("required", output["error"].lower())
 
 
-@override_settings(MCP_WRITE_ENABLED=True, V2_APIS_ENABLED=True, ATOMIC_RETRY_DISABLED=True)
+@override_settings(
+    MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False, V2_APIS_ENABLED=True, ATOMIC_RETRY_DISABLED=True
+)
 class MCPWriteToolsV2Tests(MCPToolTestMixin, IdentityRequest):
     """Test V2 write tools (create_role, create_workspace).
 
@@ -5745,7 +5785,7 @@ class MCPWriteToolsV2Tests(MCPToolTestMixin, IdentityRequest):
         self.assertFalse(data["result"]["isError"], f"Tool returned error: {data['result']}")
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPWriteToolsV1Tests(MCPToolTestMixin, IdentityRequest):
     """Test V1-only write tools (add_roles_to_group, create_role_v1)."""
 
@@ -5806,7 +5846,7 @@ class MCPWriteToolsV1Tests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(output.get("name"), "MCP Created Role", f"Got output: {output}")
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPCrossAccountRequestTests(MCPToolTestMixin, IdentityRequest):
     """Test create_cross_account_request write tool."""
 
@@ -6238,7 +6278,7 @@ class MCPGuideUserAccessDelegationV2Tests(MCPToolTestMixin, IdentityRequest):
 # --- UPDATE tool tests ---
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPUpdateGroupTests(MCPToolTestMixin, IdentityRequest):
     """Test update_group write tool."""
 
@@ -6306,7 +6346,7 @@ class MCPUpdateGroupTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("error", output)
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPUpdateRoleV1Tests(MCPToolTestMixin, IdentityRequest):
     """Test update_role_v1 and patch_role_v1 write tools."""
 
@@ -6390,7 +6430,9 @@ class MCPUpdateRoleV1Tests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("required", output["error"].lower())
 
 
-@override_settings(MCP_WRITE_ENABLED=True, V2_APIS_ENABLED=True, ATOMIC_RETRY_DISABLED=True)
+@override_settings(
+    MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False, V2_APIS_ENABLED=True, ATOMIC_RETRY_DISABLED=True
+)
 class MCPUpdateToolsV2Tests(MCPToolTestMixin, IdentityRequest):
     """Test V2 update tools (update_role, update_role_binding, update_workspace, move_workspace)."""
 
@@ -6554,7 +6596,7 @@ class MCPUpdateToolsV2Tests(MCPToolTestMixin, IdentityRequest):
         self.assertFalse(data["result"]["isError"], f"Tool returned error: {data['result']}")
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPUpdateCrossAccountTests(MCPToolTestMixin, IdentityRequest):
     """Test update_cross_account_request and patch_cross_account_request."""
 
@@ -6633,7 +6675,7 @@ class MCPUpdateCrossAccountTests(MCPToolTestMixin, IdentityRequest):
 # --- DELETE tool tests ---
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPDeleteGroupTests(MCPToolTestMixin, IdentityRequest):
     """Test delete_group and remove_principals_from_group write tools."""
 
@@ -6735,7 +6777,7 @@ class MCPDeleteGroupTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("required", output["error"].lower())
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPDeleteRoleV1Tests(MCPToolTestMixin, IdentityRequest):
     """Test remove_roles_from_group and delete_role_v1 write tools."""
 
@@ -6808,7 +6850,9 @@ class MCPDeleteRoleV1Tests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(data["error"]["code"], -32000)
 
 
-@override_settings(MCP_WRITE_ENABLED=True, V2_APIS_ENABLED=True, ATOMIC_RETRY_DISABLED=True)
+@override_settings(
+    MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False, V2_APIS_ENABLED=True, ATOMIC_RETRY_DISABLED=True
+)
 class MCPDeleteToolsV2Tests(MCPToolTestMixin, IdentityRequest):
     """Test V2 delete tools (bulk_delete_roles, delete_workspace)."""
 
@@ -6908,7 +6952,7 @@ class MCPDeleteToolsV2Tests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(data["error"]["code"], -32000)
 
 
-@override_settings(MCP_WRITE_ENABLED=True)
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPAuditLogSourceTests(MCPToolTestMixin, IdentityRequest):
     """Test that MCP write tools tag audit log entries with ai_assistant source."""
 
@@ -7324,3 +7368,323 @@ class MCPAccessCheckTests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(data["error"]["code"], -32000)
         _mock_kessel.assert_not_called()
         _mock_v1.assert_not_called()
+
+
+class MCPWriteConfirmationSettingGuardTests(IdentityRequest):
+    """Guard: every MCPToolTestMixin subclass with MCP_WRITE_ENABLED must declare MCP_WRITE_CONFIRMATION."""
+
+    def test_all_write_enabled_classes_declare_confirmation_setting(self):
+        """Prevent regressions where a write-enabled test class forgets MCP_WRITE_CONFIRMATION."""
+        module = inspect.getmodule(MCPToolTestMixin)
+        missing = []
+        for name, cls in inspect.getmembers(module, inspect.isclass):
+            if not issubclass(cls, MCPToolTestMixin) or cls is MCPToolTestMixin:
+                continue
+            wrapper = getattr(cls, "cls_atomics", None)
+            settings_override = None
+            for decorator_data in cls.__dict__.values():
+                if hasattr(decorator_data, "__wrapped__"):
+                    break
+            overrides = getattr(cls, "_overridden_settings", None)
+            if overrides is None:
+                continue
+            if not overrides.get("MCP_WRITE_ENABLED", False):
+                continue
+            if "MCP_WRITE_CONFIRMATION" not in overrides:
+                missing.append(name)
+        self.assertEqual(
+            missing,
+            [],
+            f"These test classes have MCP_WRITE_ENABLED=True but do not explicitly set "
+            f"MCP_WRITE_CONFIRMATION (True for confirmation tests, False for others): {missing}",
+        )
+
+
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=True)
+class MCPWriteConfirmationTests(MCPToolTestMixin, IdentityRequest):
+    """Test the two-phase write confirmation system."""
+
+    def setUp(self):
+        """Set up write confirmation tests."""
+        super().setUp()
+        self.url = "/_private/_a2s/mcp/"
+        self.client = APIClient()
+        self.principal = Principal.objects.create(username="test_user", tenant=self.tenant)
+
+    def tearDown(self):
+        """Tear down write confirmation tests."""
+        Group.objects.all().delete()
+        Principal.objects.all().delete()
+        super().tearDown()
+
+    def _get_confirmation_token(self, tool_name, arguments):
+        """Call a write tool and extract the confirmation token from the response."""
+        response = self._call_tool(tool_name, arguments)
+        output = json.loads(response.json()["result"]["content"][0]["text"])
+        return output["confirmation_token"]
+
+    def test_write_tool_returns_confirmation_required(self):
+        """Write tool without confirmation_token returns confirmation prompt."""
+        response = self._call_tool("create_group", {"name": "Test Group"})
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("result", data)
+        self.assertFalse(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertTrue(output["confirmation_required"])
+        self.assertIn("confirmation_token", output)
+        self.assertIn("create a new group 'Test Group'", output["message"])
+
+    def test_write_tool_executes_with_valid_token(self):
+        """Write tool with valid confirmation_token executes the operation."""
+        token = self._get_confirmation_token("create_group", {"name": "Confirmed Group"})
+
+        response2 = self._call_tool("create_group", {"name": "Confirmed Group", "confirmation_token": token})
+
+        self.assertEqual(response2.status_code, 200)
+        data = response2.json()
+        self.assertFalse(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertEqual(output["name"], "Confirmed Group")
+
+    def test_invalid_token_rejected(self):
+        """Invalid confirmation token is rejected."""
+        response = self._call_tool("create_group", {"name": "Test Group", "confirmation_token": "invalid-token-value"})
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertIn("invalid or expired", output["error"])
+
+    def test_token_cannot_be_reused(self):
+        """Confirmation token can only be used once."""
+        token = self._get_confirmation_token("create_group", {"name": "One Time Group"})
+
+        self._call_tool("create_group", {"name": "One Time Group", "confirmation_token": token})
+
+        response3 = self._call_tool("create_group", {"name": "One Time Group", "confirmation_token": token})
+
+        data = response3.json()
+        self.assertTrue(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertIn("invalid or expired", output["error"])
+
+    def test_token_rejected_for_different_arguments(self):
+        """Token issued for one set of arguments cannot be used with different arguments."""
+        token = self._get_confirmation_token("create_group", {"name": "Group A"})
+
+        response2 = self._call_tool(
+            "create_group",
+            {"name": "Group B", "confirmation_token": token},
+        )
+
+        data = response2.json()
+        self.assertTrue(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertIn("changed since the confirmation", output["error"])
+
+    def test_token_rejected_for_different_tool(self):
+        """Token issued for one tool cannot be used for a different tool."""
+        token = self._get_confirmation_token("create_group", {"name": "Cross Tool Test"})
+
+        response2 = self._call_tool(
+            "update_group",
+            {"group_name": "Cross Tool Test", "name": "New Name", "confirmation_token": token},
+        )
+
+        data = response2.json()
+        self.assertTrue(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertIn("issued for 'create_group'", output["error"])
+
+    def test_read_tools_bypass_confirmation(self):
+        """Read-only tools execute without confirmation."""
+        response = self._call_tool("list_groups")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertNotIn("confirmation_required", output)
+
+    def test_delete_tool_confirmation_shows_destructive(self):
+        """Delete tools show DESTRUCTIVE warning in confirmation message."""
+        group = Group.objects.create(name="Delete Me", tenant=self.tenant)
+
+        response = self._call_tool("delete_group", {"group_uuid": str(group.uuid)})
+
+        data = response.json()
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertTrue(output["confirmation_required"])
+        self.assertIn("DESTRUCTIVE", output["message"])
+        self.assertIn("irreversible", output["message"])
+
+    def test_confirmation_disabled_bypasses_check(self):
+        """When MCP_WRITE_CONFIRMATION=False, write tools execute immediately."""
+        with self.settings(MCP_WRITE_CONFIRMATION=False):
+            response = self._call_tool("create_group", {"name": "Direct Group"})
+
+            data = response.json()
+            self.assertFalse(data["result"]["isError"])
+            output = json.loads(data["result"]["content"][0]["text"])
+            self.assertEqual(output["name"], "Direct Group")
+
+    @override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=True)
+    def test_initialize_includes_confirmation_instructions(self):
+        """Initialize response includes confirmation protocol instructions when enabled."""
+        body = {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {"clientInfo": {"name": "test"}}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+
+        data = response.json()
+        instructions = data["result"]["instructions"]
+        self.assertIn("Write Confirmation Protocol", instructions)
+        self.assertIn("confirmation_token", instructions)
+
+    @override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
+    def test_initialize_omits_confirmation_instructions_when_disabled(self):
+        """Initialize response omits confirmation instructions when disabled."""
+        body = {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {"clientInfo": {"name": "test"}}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+
+        data = response.json()
+        instructions = data["result"]["instructions"]
+        self.assertNotIn("Write Confirmation Protocol", instructions)
+
+    @override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=True)
+    def test_write_tool_descriptions_include_confirmation_suffix(self):
+        """Write tool descriptions include confirmation protocol instructions."""
+        body = {"jsonrpc": "2.0", "method": "tools/list", "id": 1, "params": {}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+
+        data = response.json()
+        tools = {t["name"]: t for t in data["result"]["tools"]}
+        create_group = tools["create_group"]
+        self.assertIn("Write Confirmation", create_group["description"])
+        self.assertIn("NEVER auto-confirm", create_group["description"])
+
+    @override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
+    def test_write_tool_descriptions_omit_confirmation_when_disabled(self):
+        """Write tool descriptions omit confirmation suffix when disabled."""
+        body = {"jsonrpc": "2.0", "method": "tools/list", "id": 1, "params": {}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+
+        data = response.json()
+        tools = {t["name"]: t for t in data["result"]["tools"]}
+        create_group = tools["create_group"]
+        self.assertNotIn("Write Confirmation", create_group["description"])
+
+    def test_confirmation_token_not_passed_to_tool_function(self):
+        """The confirmation_token argument is stripped before calling the tool function."""
+        import dataclasses
+        from unittest.mock import MagicMock
+
+        token = self._get_confirmation_token("create_group", {"name": "Token Strip Test"})
+        original_config = _TOOL_CONFIG["create_group"]
+        mock_fn = MagicMock(wraps=original_config.fn)
+        mock_config = dataclasses.replace(original_config, fn=mock_fn)
+
+        with patch.dict("management.mcp_views._TOOL_CONFIG", {"create_group": mock_config}):
+            response2 = self._call_tool("create_group", {"name": "Token Strip Test", "confirmation_token": token})
+
+        data = response2.json()
+        self.assertFalse(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertEqual(output["name"], "Token Strip Test")
+        mock_fn.assert_called_once()
+        _, kwargs = mock_fn.call_args
+        self.assertNotIn("confirmation_token", kwargs)
+
+    def test_token_rejected_for_different_org(self):
+        """Token issued for one org cannot be used by a different org."""
+        from base64 import b64encode
+        from json import dumps as json_dumps
+
+        token = self._get_confirmation_token("create_group", {"name": "Cross Org Test"})
+
+        other_customer = self._create_customer_data()
+        other_tenant = Tenant.objects.create(
+            tenant_name=other_customer["tenant_name"],
+            account_id=other_customer["account_id"],
+            org_id=other_customer["org_id"],
+            ready=True,
+        )
+        other_identity = self._build_identity(
+            self.user_data, other_customer["account_id"], other_customer["org_id"], True, False
+        )
+        other_header = b64encode(json_dumps(other_identity).encode("utf-8"))
+        other_headers = {"HTTP_X_RH_IDENTITY": other_header}
+
+        body = {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 1,
+            "params": {
+                "name": "create_group",
+                "arguments": {"name": "Cross Org Test", "confirmation_token": token},
+            },
+        }
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **other_headers)
+
+        data = response.json()
+        self.assertTrue(data["result"]["isError"])
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertIn("different organization", output["error"])
+
+        other_tenant.delete()
+
+
+@override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=True)
+class MCPWritePreviewTests(MCPToolTestMixin, IdentityRequest):
+    """Test preview message generation for different write tool categories."""
+
+    def setUp(self):
+        """Set up preview tests."""
+        super().setUp()
+        self.url = "/_private/_a2s/mcp/"
+        self.client = APIClient()
+        self.principal = Principal.objects.create(username="test_user", tenant=self.tenant)
+
+    def tearDown(self):
+        """Tear down preview tests."""
+        Group.objects.all().delete()
+        Principal.objects.all().delete()
+        super().tearDown()
+
+    def _get_preview_message(self, tool_name, arguments):
+        """Call a tool and extract the confirmation preview message."""
+        response = self._call_tool(tool_name, arguments)
+        output = json.loads(response.json()["result"]["content"][0]["text"])
+        return output["message"]
+
+    def test_create_group_preview(self):
+        """create_group shows group name in preview."""
+        msg = self._get_preview_message("create_group", {"name": "Engineering Team"})
+        self.assertIn("create a new group 'Engineering Team'", msg)
+
+    def test_add_principals_preview(self):
+        """add_principals_to_group shows principal count in preview."""
+        group = Group.objects.create(name="Team", tenant=self.tenant)
+        msg = self._get_preview_message(
+            "add_principals_to_group",
+            {"group_uuid": str(group.uuid), "principals": ["user1", "user2"]},
+        )
+        self.assertIn("2 principal(s)", msg)
+
+    def test_delete_group_preview(self):
+        """delete_group shows DESTRUCTIVE and group identifier in preview."""
+        group = Group.objects.create(name="Old Team", tenant=self.tenant)
+        msg = self._get_preview_message("delete_group", {"group_name": "Old Team"})
+        self.assertIn("DESTRUCTIVE", msg)
+        self.assertIn("Old Team", msg)
+
+    def test_update_group_preview(self):
+        """update_group shows old and new name in preview."""
+        group = Group.objects.create(name="Dev Team", tenant=self.tenant)
+        msg = self._get_preview_message(
+            "update_group",
+            {"group_name": "Dev Team", "name": "Platform Team"},
+        )
+        self.assertIn("update group 'Dev Team'", msg)
+        self.assertIn("Platform Team", msg)
