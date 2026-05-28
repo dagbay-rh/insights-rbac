@@ -16,6 +16,9 @@
 #
 """Serializers for RoleV2 API."""
 
+import uuid
+
+from django.utils.translation import gettext as _
 from management.exceptions import RequiredFieldError
 from management.role.v2_exceptions import (
     InvalidRolePermissionsError,
@@ -155,7 +158,14 @@ class RoleV2ListSerializer(serializers.Serializer):
     name = serializers.CharField(
         required=False,
         allow_blank=True,
-        help_text="Filter by role name. Use * as wildcard for partial matching.",
+        help_text=(
+            "Filter by role name. Case-insensitive substring match by default;" " use * for glob patterns (e.g. foo*)."
+        ),
+    )
+    permission = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Filter by permission string (e.g. 'app:resource:verb'). Comma-separated for multiple.",
     )
     resource_type = serializers.CharField(
         required=False, allow_blank=True, help_text="Filter roles by the resource type they are scoped to"
@@ -172,13 +182,26 @@ class RoleV2ListSerializer(serializers.Serializer):
         }
         return super().to_internal_value(sanitized)
 
-    def validate_name(self, value):
+    def validate_name(self, value: str | None) -> str | None:
+        """Return None for empty values."""
+        return value or None
+
+    def validate_permission(self, value: str | None) -> str | None:
         """Return None for empty values."""
         return value or None
 
     def validate_fields(self, value):
         """Parse, validate, and resolve fields parameter into a set of field names."""
         return validate_fields_parameter(value, RoleV2Service.DEFAULT_LIST_FIELDS)
+
+    def validate_resource_id(self, value):
+        """Return a UUID (or None if omitted/blank) for workspace resource filtering."""
+        if value in (None, ""):
+            return None
+        try:
+            return uuid.UUID(str(value).strip())
+        except ValueError as e:
+            raise serializers.ValidationError(_("Enter a valid UUID.")) from e
 
     def validate(self, data):
         """Cross-field validation: resource_id requires resource_type."""
@@ -214,9 +237,26 @@ class RoleV2RequestSerializer(serializers.ModelSerializer):
         fields = ("id", "name", "description", "permissions")
 
     def validate_name(self, value):
-        """Reject names containing '*' which conflicts with glob/wildcard search syntax."""
+        """Reject names containing '*' or matching system/seeded role names (case-insensitive)."""
         if isinstance(value, str) and "*" in value:
             raise serializers.ValidationError("Role name must not contain asterisks (*).")
+
+        # Skip check if name hasn't changed on update
+        if self.instance and self.instance.name == value:
+            return value
+
+        from api.models import Tenant
+
+        public_tenant = Tenant.objects.get(tenant_name="public")
+        if RoleV2.objects.filter(
+            tenant=public_tenant,
+            type__in=[RoleV2.Types.SEEDED, RoleV2.Types.PLATFORM],
+            name__iexact=value,
+        ).exists():
+            raise serializers.ValidationError(
+                _("Role name '%(name)s' conflicts with an existing system role.") % {"name": value}
+            )
+
         return value
 
     @property
@@ -275,4 +315,4 @@ class RoleV2RequestSerializer(serializers.ModelSerializer):
 class RoleV2BulkDeleteRequestSerializer(serializers.Serializer):
     """Serializer for requests to delete multiple roles."""
 
-    ids = serializers.ListField(child=UUIDStringField())
+    ids = serializers.ListField(child=UUIDStringField(), min_length=1)

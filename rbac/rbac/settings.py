@@ -27,6 +27,8 @@ https://docs.djangoproject.com/en/2.0/ref/settings/
 """
 
 import os
+import ssl
+from urllib.parse import quote as _url_quote
 
 import datetime
 import sys
@@ -92,6 +94,7 @@ INSTALLED_APPS = [
     # 'django.contrib.admin',
     "django.contrib.auth",
     "django.contrib.contenttypes",
+    "django.contrib.postgres",
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
@@ -321,14 +324,20 @@ CORS_EXPOSE_HEADERS = list(globals().get("CORS_EXPOSE_HEADERS", [])) + ["Mcp-Ses
 APPEND_SLASH = False
 
 # Celery settings
+REDIS_USERNAME = None
+REDIS_SSL_CA_CERTS = None
 if ENVIRONMENT.bool("CLOWDER_ENABLED", default=False):
     REDIS_HOST = LoadedConfig.inMemoryDb.hostname
     REDIS_PORT = LoadedConfig.inMemoryDb.port
     REDIS_PASSWORD = LoadedConfig.inMemoryDb.password
+    REDIS_SSL = REDIS_PASSWORD is not None
 else:
     REDIS_HOST = ENVIRONMENT.get_value("REDIS_HOST", default="localhost")
     REDIS_PORT = ENVIRONMENT.get_value("REDIS_PORT", default="6379")
     REDIS_PASSWORD = ENVIRONMENT.get_value("REDIS_PASSWORD", default=None)
+    REDIS_USERNAME = ENVIRONMENT.get_value("REDIS_USERNAME", default=None)
+    REDIS_SSL_CA_CERTS = ENVIRONMENT.get_value("REDIS_SSL_CA_CERTS", default=None)
+    REDIS_SSL = ENVIRONMENT.bool("REDIS_SSL", default=False)
 
 # Feature Flag settings
 FEATURE_FLAGS_CONF = LoadedConfig.featureFlags
@@ -347,8 +356,6 @@ CLOWDER_ENABLED = ENVIRONMENT.bool("CLOWDER_ENABLED", default=False)
 
 FEATURE_FLAGS_CACHE_DIR = ENVIRONMENT.get_value("FEATURE_FLAGS_CACHE_DIR", default="/tmp/")
 
-REDIS_SSL = REDIS_PASSWORD is not None
-
 ACCESS_CACHE_DB = 1
 ACCESS_CACHE_LIFETIME = 10 * 60
 ACCESS_CACHE_ENABLED = ENVIRONMENT.bool("ACCESS_CACHE_ENABLED", default=True)
@@ -366,14 +373,34 @@ REDIS_CACHE_CONNECTION_PARAMS = dict(
     socket_timeout=REDIS_SOCKET_TIMEOUT,
 )
 
+if REDIS_PASSWORD:
+    REDIS_CACHE_CONNECTION_PARAMS["password"] = REDIS_PASSWORD
+if REDIS_USERNAME:
+    REDIS_CACHE_CONNECTION_PARAMS["username"] = REDIS_USERNAME
 if REDIS_SSL:
     REDIS_CACHE_CONNECTION_PARAMS["connection_class"] = redis.SSLConnection
-    REDIS_CACHE_CONNECTION_PARAMS["password"] = REDIS_PASSWORD
-    DEFAULT_REDIS_URL = f"rediss://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0?ssl_cert_reqs=required"
+    REDIS_SSL_CERT_REQS = ssl.CERT_REQUIRED if REDIS_SSL_CA_CERTS else ssl.CERT_NONE
+    REDIS_CACHE_CONNECTION_PARAMS["ssl_cert_reqs"] = REDIS_SSL_CERT_REQS
+    if REDIS_SSL_CA_CERTS:
+        REDIS_CACHE_CONNECTION_PARAMS["ssl_ca_certs"] = REDIS_SSL_CA_CERTS
+
+_redis_scheme = "rediss" if REDIS_SSL else "redis"
+if REDIS_USERNAME and REDIS_PASSWORD:
+    _redis_auth = f"{_url_quote(REDIS_USERNAME)}:{_url_quote(REDIS_PASSWORD)}@"
+elif REDIS_PASSWORD:
+    _redis_auth = f":{_url_quote(REDIS_PASSWORD)}@"
 else:
-    DEFAULT_REDIS_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/0"
+    _redis_auth = ""
+DEFAULT_REDIS_URL = f"{_redis_scheme}://{_redis_auth}{REDIS_HOST}:{REDIS_PORT}/0"
 
 CELERY_BROKER_URL = ENVIRONMENT.get_value("CELERY_BROKER_URL", default=DEFAULT_REDIS_URL)
+
+if REDIS_SSL:
+    _celery_ssl_conf = {"ssl_cert_reqs": REDIS_SSL_CERT_REQS}
+    if REDIS_SSL_CA_CERTS:
+        _celery_ssl_conf["ssl_ca_certs"] = REDIS_SSL_CA_CERTS
+    CELERY_BROKER_USE_SSL = _celery_ssl_conf
+    CELERY_REDIS_BACKEND_USE_SSL = _celery_ssl_conf
 
 ROLE_CREATE_ALLOW_LIST = ENVIRONMENT.get_value("ROLE_CREATE_ALLOW_LIST", default="").split(",")
 
@@ -528,6 +555,7 @@ PRINCIPAL_USER_DOMAIN = ENVIRONMENT.get_value("PRINCIPAL_USER_DOMAIN", default="
 PRINCIPAL_CLEANUP_DELETION_ENABLED_UMB = ENVIRONMENT.bool("PRINCIPAL_CLEANUP_DELETION_ENABLED_UMB", default=False)
 PRINCIPAL_CLEANUP_UPDATE_ENABLED_UMB = ENVIRONMENT.bool("PRINCIPAL_CLEANUP_UPDATE_ENABLED_UMB", default=False)
 UMB_JOB_ENABLED = ENVIRONMENT.bool("UMB_JOB_ENABLED", default=True)
+
 UMB_HOST = ENVIRONMENT.get_value("UMB_HOST", default="localhost")
 UMB_PORT = ENVIRONMENT.get_value("UMB_PORT", default="61612")
 # Service account name
@@ -620,11 +648,27 @@ ROOT_SCOPE_PERMISSIONS = ENVIRONMENT.get_value("ROOT_SCOPE_PERMISSIONS", default
 TENANT_SCOPE_PERMISSIONS = ENVIRONMENT.get_value("TENANT_SCOPE_PERMISSIONS", default="")
 DEFAULT_SCOPE_PERMISSIONS = ENVIRONMENT.get_value("DEFAULT_SCOPE_PERMISSIONS", default="")
 
+# Parity check settings - background job for comparing RBAC access with Kessel PDP
+PARITY_CHECK_ENABLED = ENVIRONMENT.bool("PARITY_CHECK_ENABLED", default=False)
+PARITY_CHECK_INTERVAL_SECONDS = ENVIRONMENT.int("PARITY_CHECK_INTERVAL_SECONDS", default=300)
+PARITY_CHECK_TENANT_SAMPLE_SIZE = ENVIRONMENT.int("PARITY_CHECK_TENANT_SAMPLE_SIZE", default=10)
+PARITY_CHECK_PRINCIPAL_SAMPLE_SIZE = ENVIRONMENT.int("PARITY_CHECK_PRINCIPAL_SAMPLE_SIZE", default=50)
+PARITY_CHECK_ORG_IDS = ENVIRONMENT.str("PARITY_CHECK_ORG_IDS", default="")
+PARITY_CHECK_SCHEDULE = ENVIRONMENT.str("PARITY_CHECK_SCHEDULE", default="0 0 * * *")
+
 # Org level permissons parent role uuids
 SYSTEM_DEFAULT_ROOT_WORKSPACE_ROLE_UUID = ENVIRONMENT.get_value("SYSTEM_DEFAULT_ROOT_WORKSPACE_ROLE_UUID", default="")
 SYSTEM_DEFAULT_TENANT_ROLE_UUID = ENVIRONMENT.get_value("SYSTEM_DEFAULT_TENANT_ROLE_UUID", default="")
 SYSTEM_ADMIN_ROOT_WORKSPACE_ROLE_UUID = ENVIRONMENT.get_value("SYSTEM_ADMIN_ROOT_WORKSPACE_ROLE_UUID", default="")
 SYSTEM_ADMIN_TENANT_ROLE_UUID = ENVIRONMENT.get_value("SYSTEM_ADMIN_TENANT_ROLE_UUID", default="")
+
+# MCP settings
+MCP_ENABLED = ENVIRONMENT.bool("MCP_ENABLED", default=True)
+MCP_TOOL_TIMEOUT_SECONDS = ENVIRONMENT.int("MCP_TOOL_TIMEOUT_SECONDS", default=30)
+MCP_TOOL_MAX_WORKERS = ENVIRONMENT.int("MCP_TOOL_MAX_WORKERS", default=10)
+MCP_WRITE_ENABLED = ENVIRONMENT.bool("MCP_WRITE_ENABLED", default=False)
+MCP_WRITE_CONFIRMATION = ENVIRONMENT.bool("MCP_WRITE_CONFIRMATION", default=True)
+MCP_WRITE_CONFIRMATION_TTL = ENVIRONMENT.int("MCP_WRITE_CONFIRMATION_TTL", default=300)
 
 # Manipulation of response to include ungrouped hosts id
 ADD_UNGROUPED_HOSTS_ID = ENVIRONMENT.bool("ADD_UNGROUPED_HOSTS_ID", default=False)

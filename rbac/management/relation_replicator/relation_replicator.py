@@ -83,6 +83,9 @@ class ReplicationEventType(str, Enum):
     REMOVE_UNASSIGNED_BINDING_MAPPINGS = "remove_unassigned_binding_mappings"
     BATCH_CREATE_ROLE_BINDING = "batch_create_role_binding"
     UPDATE_ROLE_BINDINGS_FOR_SUBJECT = "update_role_bindings_for_subject"
+    REMOVE_DELETED_WORKSPACE_BINDINGS = "remove_deleted_workspace_bindings"
+    UPDATE_ROOT_WORKSPACE_TENANTS = "update_root_workspace_tenants"
+    REMOVE_ROOT_PARENT_TENANT_RELATIONSHIPS = "remove_root_parent_tenant_relationships"
 
 
 class ReplicationEvent:
@@ -111,6 +114,22 @@ class ReplicationEvent:
 
     def resource_context(self) -> Dict[str, object] | None:
         """Build context for all replication events that have identifiable resources."""
+        if self.event_type == ReplicationEventType.REMOVE_ROOT_PARENT_TENANT_RELATIONSHIPS:
+            token = self.event_info.get("notify_token")
+            if not token:
+                logger.warning(
+                    "remove_root_parent_tenant_relationships batch missing notify_token in event_info=%s",
+                    self.event_info,
+                )
+                return None
+            context = ReplicationEventResourceContext(
+                org_id="",
+                event_type=self.event_type.value,
+            )
+            result = context.to_json()
+            result["notify_token"] = str(token)
+            return result
+
         # Validate org_id exists for all events
         org_id = str(self.event_info.get("org_id", ""))
         if not org_id:
@@ -211,6 +230,29 @@ class AggregateTypes(str, Enum):
 
     RELATIONS = "relations-replication-event"
     WORKSPACE = "workspace"
+    WORKSPACE_BULK = "workspace-bulk"
+
+
+class WorkspaceEventStream(Enum):
+    """
+    The class that a WorkspaceEvent belongs to.
+
+    As opposed to PartitionKey (which, for Kafka replicators, represents a partition within the same topic),
+    different WorkspaceEventClasses represent entirely different Kafka topics.
+    """
+
+    STANDARD = "standard"
+    BULK = "bulk"
+
+    def aggregate_type(self) -> AggregateTypes:
+        """Get the AggregateType that should be used for this stream in a Kafka replicator."""
+        if self == WorkspaceEventStream.STANDARD:
+            return AggregateTypes.WORKSPACE
+
+        if self == WorkspaceEventStream.BULK:
+            return AggregateTypes.WORKSPACE_BULK
+
+        raise AssertionError(f"Unexpected WorkspaceEventClass: {self!r}")
 
 
 class RelationReplicator(ABC):
@@ -221,7 +263,7 @@ class RelationReplicator(ABC):
         """Replicate the given event to Kessel Relations."""
         pass
 
-    def replicate_workspace(self, event: WorkspaceEvent):
+    def replicate_workspace(self, event: WorkspaceEvent, event_stream: WorkspaceEventStream):
         """Replicate the given workspace event to Kessel Relations."""
         pass
 

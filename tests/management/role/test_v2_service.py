@@ -222,6 +222,57 @@ class RoleV2ServiceTests(IdentityRequest):
         self.assertIn("Duplicate Name", str(cm.exception))
         self.assertEqual(cm.exception.name, "Duplicate Name")
 
+    def test_create_role_with_mixed_scope_permissions_raises_error(self):
+        """Creating a role with permissions from different scopes is rejected."""
+        from management.permission.scope_service import ImplicitResourceService
+        from management.role.v2_exceptions import InvalidRolePermissionsError
+
+        scope_service = ImplicitResourceService(
+            tenant_scope_permissions=["tenant_app:*:*"],
+            root_scope_permissions=["root_app:*:*"],
+        )
+        Permission.objects.create(permission="tenant_app:res:read", tenant=self.tenant)
+        Permission.objects.create(permission="root_app:res:read", tenant=self.tenant)
+
+        with patch("management.role.v2_service.default_implicit_resource_service", scope_service):
+            with self.assertRaises(InvalidRolePermissionsError) as ctx:
+                self.service.create(
+                    name="Mixed Scope Role",
+                    description="Should fail",
+                    permission_data=[
+                        {"application": "tenant_app", "resource_type": "res", "operation": "read"},
+                        {"application": "root_app", "resource_type": "res", "operation": "read"},
+                    ],
+                    tenant=self.tenant,
+                )
+            msg = str(ctx.exception)
+            self.assertIn("same scope", msg)
+            self.assertIn("tenant_app:res:read", msg)
+            self.assertIn("root_app:res:read", msg)
+
+    def test_create_role_with_same_scope_permissions_succeeds(self):
+        """Creating a role where all permissions share the same scope succeeds."""
+        from management.permission.scope_service import ImplicitResourceService
+
+        scope_service = ImplicitResourceService(
+            tenant_scope_permissions=["tenant_app:*:*"],
+            root_scope_permissions=[],
+        )
+        Permission.objects.create(permission="tenant_app:res:read", tenant=self.tenant)
+        Permission.objects.create(permission="tenant_app:res:write", tenant=self.tenant)
+
+        with patch("management.role.v2_service.default_implicit_resource_service", scope_service):
+            role = self.service.create(
+                name="Same Scope Role",
+                description="Should pass",
+                permission_data=[
+                    {"application": "tenant_app", "resource_type": "res", "operation": "read"},
+                    {"application": "tenant_app", "resource_type": "res", "operation": "write"},
+                ],
+                tenant=self.tenant,
+            )
+        self.assertEqual(role.permissions.count(), 2)
+
     def test_create_role_generates_uuid(self):
         """Test that creating a role auto-generates a UUID."""
         permission_data = [
@@ -277,11 +328,11 @@ class RoleV2ServiceTests(IdentityRequest):
             tenant=self.tenant,
         )
 
-        # Then: Permission tuples are replicated
+        # Then: Permission tuples and owner tuple are replicated
         role_uuid = str(role.uuid)
 
-        # Should have 2 permission tuples (one per permission)
-        self.assertEqual(len(tuples), 2)
+        # Should have 2 permission tuples + 1 owner tuple
+        self.assertEqual(len(tuples), 3)
 
         # Verify the read permission tuple exists
         read_tuples = tuples.find_tuples(
@@ -302,6 +353,16 @@ class RoleV2ServiceTests(IdentityRequest):
             )
         )
         self.assertEqual(len(write_tuples), 1, "Expected 1 write permission tuple")
+
+        # Verify the owner tuple exists
+        owner_tuples = tuples.find_tuples(
+            all_of(
+                resource("rbac", "role", role_uuid),
+                relation("owner"),
+                subject("rbac", "tenant", self.tenant.tenant_resource_id()),
+            )
+        )
+        self.assertEqual(len(owner_tuples), 1, "Expected 1 owner tuple")
 
     def test_update_role_with_empty_description_succeeds(self):
         """Test that updating a role with empty description succeeds."""
@@ -396,8 +457,8 @@ class RoleV2ServiceTests(IdentityRequest):
         # - Kept: {read} (unchanged, so not touched by delta)
 
         # The InMemoryTuples tracks the final state after all operations
-        # After update, we should have exactly 2 tuples (the new permissions)
-        self.assertEqual(len(tuples), 2)
+        # After update, we should have exactly 3 tuples (2 permissions + 1 owner)
+        self.assertEqual(len(tuples), 3)
 
         # Verify the read permission tuple still exists (it was in both old and new)
         read_tuples = tuples.find_tuples(
@@ -684,11 +745,13 @@ class RoleV2ServiceListTests(IdentityRequest):
         self.assertEqual(queryset.count(), 1)
         self.assertEqual(queryset.first().name, "role_one")
 
-    def test_list_name_exact_match_unchanged(self):
-        """Test that name without wildcard still requires exact match."""
+    def test_list_name_substring_match(self):
+        """Test that name without wildcard does substring match."""
         queryset = self.service.list({"name": "role"})
 
-        self.assertEqual(queryset.count(), 0)
+        self.assertEqual(queryset.count(), 2)
+        names = set(queryset.values_list("name", flat=True))
+        self.assertEqual(names, {"role_one", "role_two"})
 
     def test_list_filters_by_name_wildcard_no_match(self):
         """Test that a wildcard pattern matching nothing returns empty."""
@@ -807,6 +870,24 @@ class RoleV2ServiceListResourceTypeTests(IdentityRequest):
         super().setUp()
         self.service = RoleV2Service(tenant=self.tenant)
 
+        self._root_ws, _ = Workspace.objects.get_or_create(
+            tenant=self.tenant,
+            type=Workspace.Types.ROOT,
+            defaults={
+                "name": Workspace.SpecialNames.ROOT,
+                "description": Workspace.SpecialDescriptions.ROOT,
+            },
+        )
+        self._default_ws, _ = Workspace.objects.get_or_create(
+            tenant=self.tenant,
+            type=Workspace.Types.DEFAULT,
+            defaults={
+                "name": Workspace.SpecialNames.DEFAULT,
+                "description": Workspace.SpecialDescriptions.DEFAULT,
+                "parent": self._root_ws,
+            },
+        )
+
         scope_service = ImplicitResourceService(
             tenant_scope_permissions=["tenant_app:*:*"],
             root_scope_permissions=["root_app:*:*"],
@@ -851,11 +932,11 @@ class RoleV2ServiceListResourceTypeTests(IdentityRequest):
         names = set(queryset.values_list("name", flat=True))
         self.assertEqual(names, {"tenant_role", "mixed_role"})
 
-    def test_list_resource_type_workspace_returns_workspace_scoped_roles(self):
-        """Roles whose highest scope is DEFAULT or ROOT should be returned for resource_type=workspace."""
+    def test_list_resource_type_workspace_returns_default_scoped_roles_only(self):
+        """resource_type=workspace without resource_id returns only DEFAULT-scoped roles."""
         queryset = self.service.list({"resource_type": "workspace"})
         names = set(queryset.values_list("name", flat=True))
-        self.assertEqual(names, {"default_role", "root_role"})
+        self.assertEqual(names, {"default_role"})
 
     def test_list_resource_type_workspace_excludes_mixed_role(self):
         """A role with both default and tenant permissions has highest scope TENANT and should not appear for workspace."""
@@ -884,3 +965,32 @@ class RoleV2ServiceListResourceTypeTests(IdentityRequest):
         """Combined filters that contradict each other return empty."""
         queryset = self.service.list({"resource_type": "workspace", "name": "tenant_role"})
         self.assertEqual(queryset.count(), 0)
+
+    def test_list_resource_type_workspace_with_root_resource_id_returns_root_scoped_only(self):
+        """resource_type=workspace with the root workspace id returns only ROOT-scoped roles."""
+        queryset = self.service.list({"resource_type": "workspace", "resource_id": self._root_ws.id})
+        names = set(queryset.values_list("name", flat=True))
+        self.assertEqual(names, {"root_role"})
+
+    def test_list_resource_type_workspace_with_default_resource_id_returns_default_scoped_only(self):
+        """resource_type=workspace with the default workspace id returns only DEFAULT-scoped roles."""
+        queryset = self.service.list({"resource_type": "workspace", "resource_id": self._default_ws.id})
+        names = set(queryset.values_list("name", flat=True))
+        self.assertEqual(names, {"default_role"})
+
+    def test_list_resource_type_workspace_with_nonexistent_resource_id_returns_empty(self):
+        """Unknown workspace id yields no roles for resource_type=workspace."""
+        queryset = self.service.list({"resource_type": "workspace", "resource_id": uuid.uuid4()})
+        self.assertEqual(queryset.count(), 0)
+
+    def test_list_resource_type_workspace_with_standard_resource_id_returns_default_scoped_only(self):
+        """A non-root (e.g. standard) workspace id lists the same as default: DEFAULT-scoped roles only."""
+        child = Workspace.objects.create(
+            name="Sub WS",
+            tenant=self.tenant,
+            type=Workspace.Types.STANDARD,
+            parent=self._default_ws,
+        )
+        queryset = self.service.list({"resource_type": "workspace", "resource_id": child.id})
+        names = set(queryset.values_list("name", flat=True))
+        self.assertEqual(names, {"default_role"})

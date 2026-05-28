@@ -284,9 +284,22 @@ objects:
             value: ${PRINCIPAL_CLEANUP_DELETION_ENABLED_UMB}
           - name: UMB_JOB_ENABLED
             value: ${UMB_JOB_ENABLED}
+          - name: PARITY_CHECK_ENABLED
+            value: ${PARITY_CHECK_ENABLED}
+          - name: PARITY_CHECK_ORG_IDS
+            value: ${PARITY_CHECK_ORG_IDS}
+          - name: PARITY_CHECK_SCHEDULE
+            value: ${PARITY_CHECK_SCHEDULE}
           - name: READ_ONLY_API_MODE
             value: ${READ_ONLY_API_MODE}
-
+          - name: PARITY_CHECK_ENABLED
+            value: ${PARITY_CHECK_ENABLED}
+          - name: PARITY_CHECK_INTERVAL_SECONDS
+            value: ${PARITY_CHECK_INTERVAL_SECONDS}
+          - name: PARITY_CHECK_TENANT_SAMPLE_SIZE
+            value: ${PARITY_CHECK_TENANT_SAMPLE_SIZE}
+          - name: PARITY_CHECK_PRINCIPAL_SAMPLE_SIZE
+            value: ${PARITY_CHECK_PRINCIPAL_SAMPLE_SIZE}
     - name: scheduler-service
       minReplicas: ${{MIN_SCHEDULER_REPLICAS}}
       metadata:
@@ -656,6 +669,8 @@ objects:
             value: ${IT_SERVICE_TIMEOUT_SECONDS}
           - name: IT_TOKEN_JKWS_CACHE_LIFETIME
             value: ${IT_TOKEN_JKWS_CACHE_LIFETIME}
+          - name: MCP_ENABLED
+            value: ${MCP_ENABLED}
           - name: V2_APIS_ENABLED
             value: ${V2_APIS_ENABLED}
           - name: V2_READ_ONLY_API_MODE
@@ -670,6 +685,8 @@ objects:
             value: ${ADD_UNGROUPED_HOSTS_ID}
           - name: REMOVE_NULL_VALUE
             value: ${REMOVE_NULL_VALUE}
+          - name: MCP_WRITE_ENABLED
+            value: ${MCP_WRITE_ENABLED}
           - name: SYSTEM_DEFAULT_ROOT_WORKSPACE_ROLE_UUID
             value: ${SYSTEM_DEFAULT_ROOT_WORKSPACE_ROLE_UUID}
           - name: SYSTEM_ADMIN_ROOT_WORKSPACE_ROLE_UUID
@@ -684,6 +701,14 @@ objects:
             value: ${TENANT_SCOPE_PERMISSIONS}
           - name: DEFAULT_SCOPE_PERMISSIONS
             value: ${DEFAULT_SCOPE_PERMISSIONS}
+          - name: PARITY_CHECK_ENABLED
+            value: ${PARITY_CHECK_ENABLED}
+          - name: PARITY_CHECK_INTERVAL_SECONDS
+            value: ${PARITY_CHECK_INTERVAL_SECONDS}
+          - name: PARITY_CHECK_TENANT_SAMPLE_SIZE
+            value: ${PARITY_CHECK_TENANT_SAMPLE_SIZE}
+          - name: PARITY_CHECK_PRINCIPAL_SAMPLE_SIZE
+            value: ${PARITY_CHECK_PRINCIPAL_SAMPLE_SIZE}
 
     - name: rbac-kafka-consumer
       minReplicas: ${{RBAC_KAFKA_CONSUMER_REPLICAS}}
@@ -798,62 +823,6 @@ objects:
             memory: ${RBAC_KAFKA_CONSUMER_MEMORY_REQUEST}
 
     jobs:
-      - name: tenant-org-id-populator
-        podSpec:
-          image: quay.io/cloudservices/tenant-utils:latest
-          command:
-            - ./org-id-column-populator
-            - -C
-            - -a
-            - account_id
-            - -o
-            - org_id
-            - -t
-            - api_tenant
-            - --ean-translator-addr
-            - http://${TENANT_TRANSLATOR_HOST}:${TENANT_TRANSLATOR_PORT}
-            - --batch-size
-            - "50"
-          env:
-            - name: LOG_FORMAT
-              value: ${LOG_FORMAT}
-            - name: LOG_BATCH_FREQUENCY
-              value: '1'
-          resources:
-            limits:
-              cpu: 300m
-              memory: 1Gi
-            requests:
-              cpu: 50m
-              memory: 512Mi
-      - name: cross-account-request-target-org-populator
-        podSpec:
-          image: quay.io/cloudservices/tenant-utils:latest
-          command:
-            - ./org-id-column-populator
-            - -C
-            - -a
-            - target_account
-            - -o
-            - target_org
-            - -t
-            - api_crossaccountrequest
-            - --ean-translator-addr
-            - http://${TENANT_TRANSLATOR_HOST}:${TENANT_TRANSLATOR_PORT}
-            - --batch-size
-            - "50"
-          env:
-            - name: LOG_FORMAT
-              value: ${LOG_FORMAT}
-            - name: LOG_BATCH_FREQUENCY
-              value: '1'
-          resources:
-            limits:
-              cpu: 300m
-              memory: 1Gi
-            requests:
-              cpu: 50m
-              memory: 512Mi
       - name: user-id-populator
         podSpec:
           image: quay.io/cloudservices/rbac:latest
@@ -1281,12 +1250,57 @@ objects:
           env: *workspace_job_env_vars
       - name: fix-orphan-relations
         podSpec:
-          image: quay.io/cloudservices/rbac:latest
-          imagePullPolicy: Always
+          image: ${IMAGE}:${IMAGE_TAG}
           command:
             - /opt/rbac/rbac/manage.py
             - fix_orphan_relations
             - "--all"
+          resources:
+            limits:
+              cpu: 300m
+              memory: 1Gi
+            requests:
+              cpu: 50m
+              memory: 512Mi
+          env: *common_env_vars
+      - name: remove-legacy-root-workspace-tenant-parent
+        podSpec:
+          image: ${IMAGE}:${IMAGE_TAG}
+          command:
+            - /opt/rbac/rbac/manage.py
+            - remove_legacy_root_workspace_tenant_parent_relations
+            - "--all"
+          resources:
+            limits:
+              cpu: 300m
+              memory: 1Gi
+            requests:
+              cpu: 50m
+              memory: 512Mi
+          env: *common_env_vars
+      - name: replicate-default-workspaces
+        podSpec:
+          image: ${IMAGE}:${IMAGE_TAG}
+          command:
+            - /opt/rbac/rbac/manage.py
+            - replicate-default-workspaces
+            - "--all"
+          resources:
+            limits:
+              cpu: 300m
+              memory: 1Gi
+            requests:
+              cpu: 50m
+              memory: 512Mi
+          env: *common_env_vars
+      - name: replicate-root-workspace-tenants
+        podSpec:
+          image: ${IMAGE}:${IMAGE_TAG}
+          command:
+            - /opt/rbac/rbac/manage.py
+            - replicate_root_workspace_tenants
+            - "--all"
+            - "--sleep-sec=0.5"
           resources:
             limits:
               cpu: 300m
@@ -1608,10 +1622,6 @@ parameters:
 - description: Enable sending out notification events (typo variant used by service deployer)
   name: NOTIFICATONS_ENABLED
   value: 'False'
-- name: TENANT_TRANSLATOR_HOST
-  required: true
-- name: TENANT_TRANSLATOR_PORT
-  value: '8892'
 - name: GUNICORN_WORKER_MULTIPLIER
   value: '2'
 - name: GUNICORN_THREAD_LIMIT
@@ -1682,6 +1692,15 @@ parameters:
 - name: UMB_PORT
   description: Port of the UMB service
   value: '61612'
+- name: PARITY_CHECK_ENABLED
+  description: Enable Kessel-RBAC parity checks background job
+  value: 'False'
+- name: PARITY_CHECK_ORG_IDS
+  description: Comma-separated list of org_ids for parity checks
+  value: ''
+- name: PARITY_CHECK_SCHEDULE
+  description: Cron expression for parity check schedule (minute hour day_of_month month_of_year day_of_week)
+  value: '0 0 * * *'
 - name: SA_NAME
   description: Name of the rbac service account
   value: 'nonprod-hcc-rbac'
@@ -1699,7 +1718,10 @@ parameters:
   value: "https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token"
 - name: REPLICATION_TO_RELATION_ENABLED
   description: Enable replication to Relation API
-  value: "False"
+  value: "True"
+- name: MCP_ENABLED
+  description: Flag to enable the MCP (Model Context Protocol) agent-to-service endpoint. Set to False to fully disable the MCP server.
+  value: 'False'
 - name: V2_APIS_ENABLED
   description: Flag to explicitly enable v2 API endpoints
   value: 'True'
@@ -1748,8 +1770,11 @@ parameters:
 - name: REMOVE_NULL_VALUE
   description: Remove null value from the list of workspace id
   value: 'False'
+- name: MCP_WRITE_ENABLED
+  description: Enable MCP write tools (create groups, roles, etc). Disabled by default for read-only MCP deployments.
+  value: 'False'
 - name: WORKSPACE_ORG_CREATION_LIMIT
-  description: The limit of workspaces for all organisations
+  description: The limit of workspaces for all organizations
   value: '3000'
 - name: WORKSPACE_HIERARCHY_DEPTH_LIMIT
   description: The limit of workspace hierarchy depth
@@ -1820,3 +1845,15 @@ parameters:
 - name: WORKSPACE_ACCESS_TIMING_ENABLED
   description: Enable detailed timing logs for v2 workspace access checks (for performance investigation)
   value: 'False'
+- name: PARITY_CHECK_ENABLED
+  description: Enable parity access checks between RBAC and Inventory API
+  value: ''
+- name: PARITY_CHECK_INTERVAL_SECONDS
+  description: Time in seconds in which job runs
+  value: '300'
+- name: PARITY_CHECK_TENANT_SAMPLE_SIZE
+  description: Max tenants per run
+  value: '10'
+- name: PARITY_CHECK_PRINCIPAL_SAMPLE_SIZE
+  description: Max principals per tenant
+  value: '50'

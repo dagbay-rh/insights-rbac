@@ -138,20 +138,13 @@ class AccessViewTests(IdentityRequest):
 
     def tearDown(self):
         """Tear down access view tests."""
-        Group.objects.all().delete()
-        Principal.objects.all().delete()
-        Role.objects.all().delete()
-        Policy.objects.all().delete()
-        Access.objects.all().delete()
-        Workspace.objects.filter(type=Workspace.Types.UNGROUPED_HOSTS).delete()
-        Workspace.objects.filter(type=Workspace.Types.STANDARD).delete()
-        Workspace.objects.filter(type=Workspace.Types.DEFAULT).delete()
-        Workspace.objects.filter(parent__isnull=True).delete()
         # Clear the principal cache for the test tenant to avoid test isolation issues
         from management.utils import PRINCIPAL_CACHE
 
         PRINCIPAL_CACHE.delete_all_principals_for_tenant("100001")
         PRINCIPAL_CACHE.delete_all_principals_for_tenant(self.tenant.org_id)
+
+        super().tearDown()
 
     def create_role(self, role_name, headers, in_access_data=None):
         """Create a role."""
@@ -195,8 +188,11 @@ class AccessViewTests(IdentityRequest):
         return role
 
     @override_settings(ROLE_CREATE_ALLOW_LIST="app")
-    def test_get_access_success(self):
+    @patch("management.access.view.is_v2_edit_enabled_for_request", return_value=False)
+    def test_get_access_success(self, _mock_v2):
         """Test that we can obtain the expected access without pagination."""
+        from management.access.view import v1_access_by_v2_org_total
+
         role_name = "roleA"
         response = self.create_role(role_name, headers=self.headers)
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -211,6 +207,9 @@ class AccessViewTests(IdentityRequest):
         # Test that we can retrieve the principal access
         url = "{}?application={}".format(reverse("v1_management:access"), "app")
         client = APIClient()
+        before = v1_access_by_v2_org_total.labels(
+            org_id=self.customer_data["org_id"], application="app", caller_type="user"
+        )._value.get()
         response = client.get(url, **self.headers)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIsNotNone(response.data.get("data"))
@@ -218,6 +217,10 @@ class AccessViewTests(IdentityRequest):
         self.assertEqual(len(response.data.get("data")), 2)
         self.assertEqual(response.data.get("meta").get("limit"), 2)
         self.assertEqual(self.access_data, response.data.get("data")[0])
+        after = v1_access_by_v2_org_total.labels(
+            org_id=self.customer_data["org_id"], application="app", caller_type="user"
+        )._value.get()
+        self.assertEqual(after, before)
 
         # the platform default permission could also be retrieved
         url = "{}?application={}".format(reverse("v1_management:access"), "default")
@@ -831,11 +834,11 @@ class AccessViewTests(IdentityRequest):
         )
         response = client.get(url, **self.test_headers)
 
-        # Cache is called saved with sub_key ""
-        get_policy.assert_called_with(principal_id, "&order:application")
+        # Cache is called saved with sub_key "&order:application&is_org_admin:True"
+        get_policy.assert_called_with(principal_id, "&order:application&is_org_admin:True")
         called_with_para = save_policy.mock_calls[0][1]
         self.assertEqual(principal_id, called_with_para[0])
-        self.assertEqual("&order:application", called_with_para[1])
+        self.assertEqual("&order:application&is_org_admin:True", called_with_para[1])
         self.assertEqual(2, len(called_with_para[2]))  # it catches all the policies
         self.assertEqual(response.data["meta"]["count"], 2)
         self.assertEqual(response.data["data"][0]["permission"], "app:*:*")  # check order
@@ -844,10 +847,10 @@ class AccessViewTests(IdentityRequest):
             reverse("v1_management:access"), self.test_principal.username, "-application"
         )
         response = client.get(url, **self.test_headers)
-        get_policy.assert_called_with(principal_id, "&order:-application")
+        get_policy.assert_called_with(principal_id, "&order:-application&is_org_admin:True")
         called_with_para = save_policy.mock_calls[1][1]
         self.assertEqual(principal_id, called_with_para[0])
-        self.assertEqual("&order:-application", called_with_para[1])
+        self.assertEqual("&order:-application&is_org_admin:True", called_with_para[1])
         self.assertEqual(2, len(called_with_para[2]))  # it catches all the policies
         self.assertEqual(response.data["meta"]["count"], 2)
         # Response data is in reverse order
@@ -859,11 +862,11 @@ class AccessViewTests(IdentityRequest):
         )
         response = client.get(url, **self.test_headers)
 
-        # Cache is called saved with sub_key ""
-        get_policy.assert_called_with(principal_id, "&order:resource_type")
+        # Cache is called saved with sub_key "&order:resource_type&is_org_admin:True"
+        get_policy.assert_called_with(principal_id, "&order:resource_type&is_org_admin:True")
         called_with_para = save_policy.mock_calls[2][1]
         self.assertEqual(principal_id, called_with_para[0])
-        self.assertEqual("&order:resource_type", called_with_para[1])
+        self.assertEqual("&order:resource_type&is_org_admin:True", called_with_para[1])
         self.assertEqual(2, len(called_with_para[2]))  # it catches all the policies
         self.assertEqual(response.data["meta"]["count"], 2)
         self.assertEqual(response.data["data"][0]["permission"], "app:*:*")  # check order
@@ -872,10 +875,10 @@ class AccessViewTests(IdentityRequest):
             reverse("v1_management:access"), self.test_principal.username, "-resource_type"
         )
         response = client.get(url, **self.test_headers)
-        get_policy.assert_called_with(principal_id, "&order:-resource_type")
+        get_policy.assert_called_with(principal_id, "&order:-resource_type&is_org_admin:True")
         called_with_para = save_policy.mock_calls[3][1]
         self.assertEqual(principal_id, called_with_para[0])
-        self.assertEqual("&order:-resource_type", called_with_para[1])
+        self.assertEqual("&order:-resource_type&is_org_admin:True", called_with_para[1])
         self.assertEqual(2, len(called_with_para[2]))  # it catches all the policies
         self.assertEqual(response.data["meta"]["count"], 2)
         # Response data is in reverse order
@@ -887,11 +890,11 @@ class AccessViewTests(IdentityRequest):
         )
         response = client.get(url, **self.test_headers)
 
-        # Cache is called saved with sub_key ""
-        get_policy.assert_called_with(principal_id, "&order:verb")
+        # Cache is called saved with sub_key "&order:verb&is_org_admin:True"
+        get_policy.assert_called_with(principal_id, "&order:verb&is_org_admin:True")
         called_with_para = save_policy.mock_calls[4][1]
         self.assertEqual(principal_id, called_with_para[0])
-        self.assertEqual("&order:verb", called_with_para[1])
+        self.assertEqual("&order:verb&is_org_admin:True", called_with_para[1])
         self.assertEqual(2, len(called_with_para[2]))  # it catches all the policies
         self.assertEqual(response.data["meta"]["count"], 2)
         self.assertEqual(response.data["data"][0]["permission"], "app:*:*")  # check order
@@ -900,11 +903,11 @@ class AccessViewTests(IdentityRequest):
             reverse("v1_management:access"), self.test_principal.username, "-verb"
         )
         response = client.get(url, **self.test_headers)
-        # Cache is called saved with sub_key ""
-        get_policy.assert_called_with(principal_id, "&order:-verb")
+        # Cache is called saved with sub_key "&order:-verb&is_org_admin:True"
+        get_policy.assert_called_with(principal_id, "&order:-verb&is_org_admin:True")
         called_with_para = save_policy.mock_calls[5][1]
         self.assertEqual(principal_id, called_with_para[0])
-        self.assertEqual("&order:-verb", called_with_para[1])
+        self.assertEqual("&order:-verb&is_org_admin:True", called_with_para[1])
         self.assertEqual(2, len(called_with_para[2]))  # it catches all the policies
         self.assertEqual(response.data["meta"]["count"], 2)
         # Response data is in reverse order
@@ -915,11 +918,11 @@ class AccessViewTests(IdentityRequest):
             reverse("v1_management:access"), self.test_principal.username
         )
         response = client.get(url, **self.test_headers)
-        # Cache is called saved with sub_key ""
-        get_policy.assert_called_with(principal_id, "")
+        # Cache is called saved with sub_key "&is_org_admin:True"
+        get_policy.assert_called_with(principal_id, "&is_org_admin:True")
         called_with_para = save_policy.mock_calls[6][1]
         self.assertEqual(principal_id, called_with_para[0])
-        self.assertEqual("", called_with_para[1])
+        self.assertEqual("&is_org_admin:True", called_with_para[1])
         self.assertEqual(2, len(called_with_para[2]))  # it catches all the policies
         self.assertEqual(response.data["meta"]["count"], 2)
 
@@ -1069,10 +1072,10 @@ class AccessViewTests(IdentityRequest):
         )
         response = client.get(url, **self.test_headers)
 
-        get_policy.assert_called_with(principal_id, "app")
+        get_policy.assert_called_with(principal_id, "app&is_org_admin:True")
         called_with_para = save_policy.mock_calls[0][1]  # save_policy params
         self.assertEqual(principal_id, called_with_para[0])
-        self.assertEqual("app", called_with_para[1])
+        self.assertEqual("app&is_org_admin:True", called_with_para[1])
         self.assertEqual([self.access_data], called_with_para[2])  # it catches all the policies for app
         self.assertEqual(response.data["meta"]["count"], 1)
         self.assertEqual(
@@ -1086,11 +1089,11 @@ class AccessViewTests(IdentityRequest):
         )
         response = client.get(url, **self.test_headers)
 
-        # Cache is called saved with sub_key ""
-        get_policy.assert_called_with(principal_id, "")
+        # Cache is called saved with sub_key "&is_org_admin:True"
+        get_policy.assert_called_with(principal_id, "&is_org_admin:True")
         called_with_para = save_policy.mock_calls[1][1]
         self.assertEqual(principal_id, called_with_para[0])
-        self.assertEqual("", called_with_para[1])
+        self.assertEqual("&is_org_admin:True", called_with_para[1])
         self.assertEqual(2, len(called_with_para[2]))  # it catches all the policies for app
         self.assertEqual(response.data["meta"]["count"], 2)
         self.assertEqual(len(response.data["data"]), 1)  # returns one policy because limit is 1
@@ -1262,6 +1265,37 @@ class AccessViewTests(IdentityRequest):
         # Allowed permission should be in the cached data
         self.assertIn("test_app:resource:allowed_action", cached_permissions)
 
+    @patch("management.cache.AccessCache.get_policy", return_value=None)
+    @patch("management.cache.AccessCache.save_policy", return_value=None)
+    def test_is_org_admin_included_in_cache_sub_key(self, mock_save_policy, mock_get_policy):
+        """Test that is_org_admin is included in the cache sub_key so flag changes trigger cache misses."""
+        client = APIClient()
+        url = "{}?application=app".format(reverse("v1_management:access"))
+
+        # Request as org admin (self.test_headers uses is_org_admin=True)
+        client.get(url, **self.test_headers)
+        _, admin_sub_key = mock_get_policy.call_args[0]
+        self.assertIn("is_org_admin:True", admin_sub_key)
+
+        mock_get_policy.reset_mock()
+        mock_save_policy.reset_mock()
+
+        # Build non-admin headers
+        user_data = {"username": "test_user", "email": "test@gmail.com"}
+        non_admin_request_context = self._create_request_context(
+            {"account_id": "1111111", "tenant_name": "acct1111111", "org_id": "100001"},
+            user_data,
+            is_org_admin=False,
+        )
+        non_admin_headers = non_admin_request_context["request"].META
+
+        client.get(url, **non_admin_headers)
+        _, non_admin_sub_key = mock_get_policy.call_args[0]
+        self.assertIn("is_org_admin:False", non_admin_sub_key)
+
+        # The two sub_keys must differ so the cache returns separate entries
+        self.assertNotEqual(admin_sub_key, non_admin_sub_key)
+
     @override_settings(ROLE_CREATE_ALLOW_LIST="legacy_app,other_app")
     @override_settings(V2_MIGRATION_APP_EXCLUDE_LIST=["legacy_app"])
     @patch("management.access.view.is_v2_edit_enabled_for_request", return_value=True)
@@ -1275,32 +1309,65 @@ class AccessViewTests(IdentityRequest):
         policy.group = self.group
         policy.save()
 
+        from management.access.view import v1_access_by_v2_org_total
+
         client = APIClient()
         url = f"{reverse('v1_management:access')}?application=legacy_app"
+        before = v1_access_by_v2_org_total.labels(
+            org_id=self.customer_data["org_id"], application="legacy_app", caller_type="user"
+        )._value.get()
         response = client.get(url, **self.headers)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         permissions = [row["permission"] for row in response.data.get("data", [])]
         self.assertIn("legacy_app:*:*", permissions)
+        after = v1_access_by_v2_org_total.labels(
+            org_id=self.customer_data["org_id"], application="legacy_app", caller_type="user"
+        )._value.get()
+        self.assertEqual(after, before)
 
     @override_settings(V2_MIGRATION_APP_EXCLUDE_LIST=["legacy_app"])
+    @patch("management.access.view.logger")
     @patch("management.access.view.is_v2_edit_enabled_for_request", return_value=True)
-    def test_access_v2_tenant_disallowed_app_rejected(self, _mock_v2):
+    def test_access_v2_tenant_disallowed_app_rejected(self, _mock_v2, mock_log):
         """V2 orgs are rejected when querying an app not in V2_MIGRATION_APP_EXCLUDE_LIST."""
+        from management.access.view import v1_access_by_v2_org_total
+
         client = APIClient()
         url = f"{reverse('v1_management:access')}?application=other_app"
+        before = v1_access_by_v2_org_total.labels(
+            org_id=self.customer_data["org_id"], application="other_app", caller_type="user"
+        )._value.get()
         response = client.get(url, **self.headers)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("Disallowed", response.data.get("detail", ""))
+        mock_log.info.assert_called_once()
+        log_msg = mock_log.info.call_args[0][0] % mock_log.info.call_args[0][1:]
+        self.assertIn("result=rejected", log_msg)
+        self.assertIn(str(self.tenant.org_id), log_msg)
+        self.assertIn("other_app", log_msg)
+        after = v1_access_by_v2_org_total.labels(
+            org_id=self.customer_data["org_id"], application="other_app", caller_type="user"
+        )._value.get()
+        self.assertEqual(after, before + 1)
 
     @override_settings(V2_MIGRATION_APP_EXCLUDE_LIST=["legacy_app"])
     @patch("management.access.view.is_v2_edit_enabled_for_request", return_value=True)
     def test_access_v2_tenant_empty_application_rejected(self, _mock_v2):
         """V2 orgs are rejected when application= is empty."""
+        from management.access.view import v1_access_by_v2_org_total
+
         client = APIClient()
         url = f"{reverse('v1_management:access')}?application="
+        before = v1_access_by_v2_org_total.labels(
+            org_id=self.customer_data["org_id"], application="", caller_type="user"
+        )._value.get()
         response = client.get(url, **self.headers)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("must specify", response.data.get("detail", ""))
+        after = v1_access_by_v2_org_total.labels(
+            org_id=self.customer_data["org_id"], application="", caller_type="user"
+        )._value.get()
+        self.assertEqual(after, before + 1)
 
     @override_settings(V2_MIGRATION_APP_EXCLUDE_LIST=["legacy_app"])
     @patch("management.access.view.is_v2_edit_enabled_for_request", return_value=True)
@@ -1311,3 +1378,40 @@ class AccessViewTests(IdentityRequest):
         response = client.get(url, **self.headers)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("other_app", response.data.get("detail", ""))
+
+    @override_settings(V2_MIGRATION_APP_EXCLUDE_LIST=["legacy_app"])
+    @patch("management.access.view.logger")
+    @patch("management.access.view.is_v2_edit_enabled_for_request", return_value=True)
+    def test_access_v2_org_metric_logs_context(self, _mock_v2, mock_logger):
+        """Test that a structured log line is emitted when a v2 org is rejected from v1 /access."""
+        client = APIClient()
+        url = f"{reverse('v1_management:access')}?application=other_app"
+        response = client.get(url, **self.headers, HTTP_USER_AGENT="insights-chrome/1.0")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        mock_logger.info.assert_called_once()
+        log_msg = mock_logger.info.call_args[0][0] % mock_logger.info.call_args[0][1:]
+        self.assertIn("result=rejected", log_msg)
+        self.assertIn(self.customer_data["org_id"], log_msg)
+        self.assertIn("other_app", log_msg)
+        self.assertIn("caller_type=user", log_msg)
+        self.assertIn("user_id=", log_msg)
+        self.assertIn("request_id=", log_msg)
+        self.assertIn("user_agent=insights-chrome/1.0", log_msg)
+
+    @override_settings(V2_MIGRATION_APP_EXCLUDE_LIST=["legacy_app"])
+    @patch("management.access.view.is_v2_edit_enabled_for_request", return_value=True)
+    def test_access_v2_org_metric_service_account_caller_type(self, _mock_v2):
+        """Test that the metric labels caller_type as service_account for service account requests."""
+        from management.access.view import v1_access_by_v2_org_total
+
+        client = APIClient()
+        url = f"{reverse('v1_management:access')}?application=other_app"
+        before = v1_access_by_v2_org_total.labels(
+            org_id=self.customer_data["org_id"], application="other_app", caller_type="service_account"
+        )._value.get()
+        response = client.get(url, **self.headers_service_account)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        after = v1_access_by_v2_org_total.labels(
+            org_id=self.customer_data["org_id"], application="other_app", caller_type="service_account"
+        )._value.get()
+        self.assertEqual(after, before + 1)

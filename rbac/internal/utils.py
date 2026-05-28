@@ -31,12 +31,18 @@ from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.urls import resolve
+from internal.pg_notify_wait import (
+    REMOVE_LEGACY_ROOT_WORKSPACE_PARENT_NOTIFY_CHANNEL,
+    REMOVE_LEGACY_ROOT_WORKSPACE_PARENT_NOTIFY_TIMEOUT_SECONDS,
+    wait_for_pg_notify,
+)
 from internal.schemas import INVENTORY_INPUT_SCHEMAS, RELATION_INPUT_SCHEMAS
 from jsonschema import validate
-from management.atomic_transactions import atomic, atomic_block
+from management.atomic_transactions import atomic, atomic_block, atomic_with_retry
 from management.group.platform import DefaultGroupNotAvailableError, GlobalPolicyIdService
 from management.models import BindingMapping, Role, Workspace
 from management.permission.scope_service import TenantScopeResources
+from management.principal.model import Principal
 from management.principal.proxy import PrincipalProxy
 from management.relation_replicator.logging_replicator import LoggingReplicator, stringify_spicedb_relationship
 from management.relation_replicator.noop_replicator import NoopReplicator
@@ -49,8 +55,8 @@ from management.relation_replicator.relation_replicator import (
 )
 from management.relation_replicator.relations_api_replicator import RelationsApiReplicator
 from management.relation_replicator.types import RelationTuple
-from management.role.v2_model import CustomRoleV2, RoleV2
-from management.role_binding.model import RoleBinding
+from management.role.v2_model import RoleV2
+from management.role_binding.model import RoleBinding, RoleBindingPrincipal
 from management.tenant_mapping.model import DefaultAccessType, TenantMapping
 from management.tenant_mapping.v2_activation import (
     TenantVersion,
@@ -64,6 +70,8 @@ from management.utils import as_uuid
 from management.workspace.relation_api_dual_write_workspace_handler import RelationApiDualWriteWorkspaceHandler
 from migration_tool.utils import create_relationship
 
+from api.cross_access.model import CrossAccountRequest
+from api.cross_access.relation_api_dual_write_cross_access_handler import RelationApiDualWriteCrossAccessHandler
 from api.models import Tenant, User
 
 logger = logging.getLogger(__name__)
@@ -239,7 +247,7 @@ def _build_workspace_graph(tenant) -> tuple[list, dict]:
 
     Returns:
         tuple of:
-        - root_workspace_ids: list of workspace IDs that have no parent (parent = tenant)
+        - root_workspace_ids: list of workspace IDs with no DB parent (typically root workspace)
         - children_by_parent: dict mapping parent_id -> list of child workspace_ids
     """
     db_workspaces = list(Workspace.objects.filter(tenant=tenant).order_by("id"))
@@ -267,8 +275,7 @@ class WorkspaceProcessResult:
 
 def _process_workspace_in_transaction(
     ws_id_uuid,
-    expected_parent_type: str,
-    expected_parent_id: str,
+    expected_parent_workspace_id: str,
     tenant,
     read_tuples_fn,
     replicator,
@@ -277,13 +284,12 @@ def _process_workspace_in_transaction(
     """
     Process a single workspace within a transaction.
 
-    Locks parent (if workspace) and child, verifies parent hasn't changed,
+    Locks parent workspace then child, verifies parent hasn't changed,
     checks if parent relation exists in Kessel, and replicates if missing.
 
     Args:
         ws_id_uuid: The workspace UUID to process
-        expected_parent_type: "tenant" or "workspace"
-        expected_parent_id: The expected parent ID
+        expected_parent_workspace_id: Expected parent workspace UUID (DB `parent_id`)
         tenant: The Tenant object
         read_tuples_fn: Function to read tuples from Kessel
         replicator: The replicator to use for writing relations
@@ -295,13 +301,13 @@ def _process_workspace_in_transaction(
     result = WorkspaceProcessResult()
 
     with transaction.atomic():
-        # Lock parent first (if it's a workspace, not tenant)
-        if expected_parent_type == "workspace":
-            try:
-                Workspace.objects.select_for_update().get(id=expected_parent_id)
-            except Workspace.DoesNotExist:
-                logger.warning(f"Parent workspace {expected_parent_id} no longer exists, skipping child {ws_id_uuid}")
-                return result
+        try:
+            Workspace.objects.select_for_update().get(id=expected_parent_workspace_id)
+        except Workspace.DoesNotExist:
+            logger.warning(
+                f"Parent workspace {expected_parent_workspace_id} no longer exists, skipping child {ws_id_uuid}"
+            )
+            return result
 
         # Lock the child workspace
         try:
@@ -315,17 +321,14 @@ def _process_workspace_in_transaction(
 
         # Verify parent hasn't changed (in case of concurrent modification)
         actual_parent_id = str(ws.parent_id) if ws.parent_id else None
-        if expected_parent_type == "tenant" and actual_parent_id is not None:
-            logger.warning(f"Workspace {ws_id} parent changed from tenant to {actual_parent_id}, skipping")
-            return result
-        if expected_parent_type == "workspace" and actual_parent_id != expected_parent_id:
+        if actual_parent_id != expected_parent_workspace_id:
             logger.warning(
-                f"Workspace {ws_id} parent changed from {expected_parent_id} to {actual_parent_id}, skipping"
+                f"Workspace {ws_id} parent changed from {expected_parent_workspace_id} to {actual_parent_id}, skipping"
             )
             return result
 
         # Check if parent relation exists in Kessel
-        parent_tuples = read_tuples_fn("workspace", ws_id, "parent", expected_parent_type, expected_parent_id)
+        parent_tuples = read_tuples_fn("workspace", ws_id, "parent", "workspace", expected_parent_workspace_id)
         if parent_tuples:
             return result
 
@@ -336,8 +339,8 @@ def _process_workspace_in_transaction(
         relation = create_relationship(
             ("rbac", "workspace"),
             ws_id,
-            ("rbac", expected_parent_type),
-            expected_parent_id,
+            ("rbac", "workspace"),
+            expected_parent_workspace_id,
             "parent",
         )
 
@@ -352,10 +355,10 @@ def _process_workspace_in_transaction(
                 )
             )
             result.relations_added = 1
-            logger.info(f"Added parent relation: workspace:{ws_id}#parent@{expected_parent_type}:{expected_parent_id}")
+            logger.info(f"Added parent relation: workspace:{ws_id}#parent@workspace:{expected_parent_workspace_id}")
         else:
             result.relations_to_add_count = 1
-            logger.info(f"DRY RUN: Would add: workspace:{ws_id}#parent@{expected_parent_type}:{expected_parent_id}")
+            logger.info(f"DRY RUN: Would add: workspace:{ws_id}#parent@workspace:{expected_parent_workspace_id}")
 
     return result
 
@@ -373,11 +376,10 @@ def rebuild_tenant_workspace_relations(
     their parent relations exist in Kessel. This is a prerequisite for
     cleanup_tenant_orphaned_relationships to work correctly.
 
-    The hierarchy is: tenant -> root workspace -> default workspace -> other workspaces
-    - Root workspace has parent = tenant
-    - Other workspaces have parent = their parent workspace
+    Root workspaces are not linked to the tenant in relations; only workspace-to-workspace
+    parent edges are replicated (default -> root -> ...).
 
-    Uses BFS traversal starting from root workspace. For each workspace, locks the
+    Uses BFS traversal from each root workspace's children. For each workspace, locks the
     parent first, then locks the child, checks/replicates the parent relation,
     then moves to children. This minimizes lock contention.
 
@@ -392,8 +394,6 @@ def rebuild_tenant_workspace_relations(
     Returns:
         dict: Results including workspaces checked, relations added, etc.
     """
-    tenant_resource_id = tenant.tenant_resource_id()
-
     workspaces_checked = 0
     relations_added = 0
     relations_to_add_count = 0
@@ -402,20 +402,20 @@ def rebuild_tenant_workspace_relations(
     # Build workspace graph from DB
     root_workspace_ids, children_by_parent = _build_workspace_graph(tenant)
 
-    # Build BFS queue starting from root workspaces
+    # Build BFS queue from root workspaces' children only (no workspace#parent@tenant edge).
     queue = deque()
     for root_id in root_workspace_ids:
-        queue.append((root_id, "tenant", tenant_resource_id))
+        for child_id in children_by_parent.get(root_id, []):
+            queue.append((child_id, str(root_id)))
 
     # BFS traversal - process each workspace in transaction
     while queue:
-        ws_id_uuid, expected_parent_type, expected_parent_id = queue.popleft()
+        ws_id_uuid, expected_parent_workspace_id = queue.popleft()
 
         # Process workspace in transaction (locks parent then child)
         result = _process_workspace_in_transaction(
             ws_id_uuid,
-            expected_parent_type,
-            expected_parent_id,
+            expected_parent_workspace_id,
             tenant,
             read_tuples_fn,
             replicator,
@@ -432,7 +432,7 @@ def rebuild_tenant_workspace_relations(
         # Add children to queue for BFS (outside transaction to release locks)
         if ws_id_uuid in children_by_parent:
             for child_id in children_by_parent[ws_id_uuid]:
-                queue.append((child_id, "workspace", str(ws_id_uuid)))
+                queue.append((child_id, str(ws_id_uuid)))
 
     if dry_run and relations_to_add_count:
         logger.info(f"DRY RUN: Would add {relations_to_add_count} parent relations for tenant {tenant.org_id}")
@@ -444,6 +444,74 @@ def rebuild_tenant_workspace_relations(
         "workspaces_missing_parent": workspaces_missing_parent_count,
         "relations_to_add": relations_to_add_count if dry_run else relations_added,
         "relations_added": relations_added,
+    }
+
+
+def remove_legacy_root_workspace_tenant_parent_relations() -> dict:
+    """
+    Enqueue removal of workspace(root)#parent@tenant relationship tuples.
+
+    Bootstrapping no longer creates this edge; this job clears stale tuples still present in Kessel.
+    """
+    if not settings.REPLICATION_TO_RELATION_ENABLED:
+        return {"skipped": True, "reason": "REPLICATION_TO_RELATION_ENABLED is False"}
+
+    replicator = OutboxReplicator()
+    qs = Tenant.objects.exclude(tenant_name="public").order_by("id")
+
+    batch: list[RelationTuple] = []
+    tenants_processed = 0
+    batch_size = 500
+    tenants_total = qs.count()
+
+    def flush_batch() -> None:
+        if not batch:
+            return
+        notify_token = str(uuid.uuid4())
+        replicator.replicate(
+            ReplicationEvent(
+                event_type=ReplicationEventType.REMOVE_ROOT_PARENT_TENANT_RELATIONSHIPS,
+                info={
+                    "batch_size": len(batch),
+                    "notify_token": notify_token,
+                },
+                partition_key=PartitionKey.byEnvironment(),
+                add=[],
+                remove=batch,
+            )
+        )
+        batch.clear()
+        logger.info(f"Processed {tenants_processed} of {tenants_total} tenants")
+        wait_for_pg_notify(
+            channel=REMOVE_LEGACY_ROOT_WORKSPACE_PARENT_NOTIFY_CHANNEL,
+            expected_payload=notify_token,
+            timeout_seconds=float(REMOVE_LEGACY_ROOT_WORKSPACE_PARENT_NOTIFY_TIMEOUT_SECONDS),
+            log_label="remove_legacy_root_workspace_tenant_parent",
+        )
+
+    for tenant in qs.iterator(chunk_size=500):
+        tenants_processed += 1
+        tenant_resource_id = tenant.tenant_resource_id()
+        if tenant_resource_id is None:
+            continue
+        root = Workspace.objects.root(tenant=tenant)
+        batch.append(
+            create_relationship(
+                ("rbac", "workspace"),
+                str(root.id),
+                ("rbac", "tenant"),
+                tenant_resource_id,
+                "parent",
+            )
+        )
+        if len(batch) >= batch_size:
+            flush_batch()
+
+    flush_batch()
+
+    return {
+        "skipped": False,
+        "tenants_processed": tenants_processed,
     }
 
 
@@ -479,7 +547,7 @@ def lock_binding_mappings_with_roles_by_uuid(uuids: Iterable[str | uuid.UUID]) -
 #
 # Unfortunately, we must *also* use select_for_update() here because we are potentially interacting with
 # concurrent V1 writers (which all use SELECT FOR UPDATE rather than SERIALIZABLE).
-@atomic
+@atomic_with_retry(retries=3)
 def _do_replicate_missing_binding_tuples_batch(tenant_id: int, raw_role_bindings: list[RoleBinding]):
     tenant = Tenant.objects.get(id=tenant_id)
     bootstrap_lock = lock_tenant_for_bootstrap(tenant)
@@ -495,7 +563,7 @@ def _do_replicate_missing_binding_tuples_batch(tenant_id: int, raw_role_bindings
     role_bindings = list(
         RoleBinding.objects.filter(pk__in=(b.pk for b in raw_role_bindings))
         .exclude(uuid__in=builtin_binding_ids)
-        .select_related("role")
+        .select_related("role", "role__tenant")
         .prefetch_related("group_entries", "principal_entries", "role__permissions")
         .select_for_update(of=["self"])
     )
@@ -539,14 +607,7 @@ def _do_replicate_missing_binding_tuples_batch(tenant_id: int, raw_role_bindings
         # Ensure that we additionally re-replicate the relevant role (if it's a custom role).
         if role_binding.role.type == RoleV2.Types.CUSTOM:
             if role_binding.role.id not in role_tuples_by_role_id:
-                to_add, to_remove = CustomRoleV2.replication_tuples(
-                    role=role_binding.role, new_permissions=list(role_binding.role.permissions.all())
-                )
-
-                if len(to_remove) > 0:
-                    raise AssertionError(f"Should not have relations to remove, but got: {to_remove}")
-
-                role_tuples_by_role_id[role_binding.role.id] = to_add
+                role_tuples_by_role_id[role_binding.role.id] = RoleV2.tuples_for_create(role_binding.role)
 
     replicator = OutboxReplicator()
 
@@ -1179,3 +1240,134 @@ def remove_unassigned_system_binding_mappings(replicator: Optional[RelationRepli
 
             if role_binding is not None:
                 role_binding.delete()
+
+
+@atomic
+def _do_remove_orphaned_car(raw_car: CrossAccountRequest, replicator: RelationReplicator):
+    logger.info(f"Processing orphaned CAR: pk={raw_car.pk!r}")
+
+    orphaned_car: CrossAccountRequest = CrossAccountRequest.objects.select_for_update().filter(pk=raw_car.pk).first()
+
+    if orphaned_car is None:
+        logger.info(f"Orphaned CAR vanished before it could be removed: pk={raw_car.pk!r}")
+        return
+
+    if orphaned_car.status != "approved":
+        logger.info(f"Skipping orphaned CAR is no longer approved: pk={raw_car.pk!r}")
+        return
+
+    if orphaned_car.user_id is None:
+        logger.info(f"Skipping orphaned CAR with null user_id: pk={raw_car.pk!r}")
+        return
+
+    # If the user is somehow created after this check, that's okay; at worst, they'll have to make a new
+    # cross-account request.
+    if Principal.objects.filter(user_id=orphaned_car.user_id).exists():
+        logger.info(f"Skipping CAR that is no longer orphaned: pk={raw_car.pk!r}")
+        return
+
+    target_tenant = Tenant.objects.filter(org_id=orphaned_car.target_org).first()
+
+    if target_tenant is None:
+        logger.info(f"Skipping orphaned CAR with non-existent tenant: pk={orphaned_car.pk}")
+        return
+
+    tenant_version = lock_tenant_version(target_tenant)
+
+    # Since the principals don't exist, we need to ensure that BindingMappings will be treated as authoritative (so
+    # that we can later reconstruct the correct RoleBindings from them). This is the case only for V1 tenants.
+    if tenant_version != TenantVersion.VERSION_1:
+        logger.info(f"Skipping orphaned CAR in non-V1 tenant: pk={orphaned_car.pk}")
+        return
+
+    if RoleBindingPrincipal.objects.filter(source=str(orphaned_car.source_key())).exists():
+        raise AssertionError(f"Expected no principal entries to have been created for CAR with pk={orphaned_car.pk!r}")
+
+    car_binding_mappings = list(
+        BindingMapping.objects.select_for_update().filter(mappings__users__has_key=str(orphaned_car.source_key()))
+    )
+
+    for binding_mapping in car_binding_mappings:
+        if binding_mapping.mappings["users"][str(orphaned_car.source_key())] != orphaned_car.user_id:
+            raise AssertionError(
+                f"Unexpected mapping: "
+                f"mapping pk={binding_mapping.pk!r}, "
+                f"mappings={binding_mapping.mappings['users']}, "
+                f"CAR pk={orphaned_car.pk!r}"
+            )
+
+    # Any RoleBindings corresponding to the found BindingMappings cannot *possibly* be correct. The BindingMappings
+    # all include the CAR's user ID, but we have already determined that no Principal with that user ID exists,
+    # so there cannot possibly be a RoleBindingPrincipal that refers to such a Principal. Thus, we should delete any
+    # such RoleBindings and require them to be re-created later. (This is a valid state for a V1 tenant to be in,
+    # but it must be fixed before the tenant migrates to V2.)
+    bad_role_bindings = list(
+        RoleBinding.objects.select_for_update()
+        .filter(tenant=target_tenant)
+        .filter(uuid__in=(bm.mappings["id"] for bm in car_binding_mappings))
+    )
+
+    if len(bad_role_bindings) > 0:
+        logger.warning(
+            "Removing mismatched RoleBindings: "
+            + ", ".join(f"pk={rb.pk!r}, uuid={str(rb.uuid)}" for rb in bad_role_bindings)
+        )
+
+        RoleBinding.objects.filter(pk__in=(rb.pk for rb in bad_role_bindings)).delete()
+
+    orphaned_car.status = "expired"
+    orphaned_car.save()
+
+    dual_write_handler = RelationApiDualWriteCrossAccessHandler(
+        cross_account_request=orphaned_car,
+        event_type=ReplicationEventType.EXPIRE_CROSS_ACCOUNT_REQUEST,
+        replicator=replicator,
+    )
+
+    # We have to suppress the migration to RoleBindings because there might be a single BindingMapping with
+    # principals from multiple orphaned CARs (in which case it still couldn't be migrated after we remove the first
+    # one). We know that the tenant is a V1 tenant, so its BindingMappings will be treated as authoritative.
+    #
+    # We have just deleted any RoleBindings that could exist for the CAR, and we will just not create any here.
+    # Actually re-creating the RoleBindings is left to another migration (in practice, the migrate_binding_scope
+    # migration).
+    dual_write_handler.generate_relations_to_remove_roles(orphaned_car.roles.all(), suppress_v1_migration=True)
+    dual_write_handler.replicate()
+
+    logger.info(f"Expired orphaned CAR: pk={orphaned_car.pk!r}")
+
+
+@atomic
+def expire_orphaned_cross_account_requests(replicator: Optional[RelationReplicator] = None):
+    """Expire cross-account requests that refer to a principal that no longer exists."""
+    if replicator is None:
+        replicator = OutboxReplicator()
+
+    # We must exclude user_id=None in the subquery. Otherwise, if the user_id is not present and at least one Principal
+    # user_id is null, the result of the IN operator will also be null. (I think this is bad, but oh well.) Then,
+    # when Django negates the null, it will still be null. This means the where clause will at best be (TRUE AND NULL
+    # AND TRUE), which will still filter out the row.
+    orphaned_cars = (
+        CrossAccountRequest.objects.filter(status="approved")
+        .exclude(user_id__in=Principal.objects.exclude(user_id=None).values_list("user_id", flat=True))
+        .exclude(user_id=None)
+    )
+
+    logger.info(f"About to process ~{orphaned_cars.count()} orphaned cross-account requests.")
+
+    count = 0
+    failed = 0
+
+    for orphaned_car in orphaned_cars.iterator():
+        count += 1
+
+        try:
+            _do_remove_orphaned_car(orphaned_car, replicator)
+        except Exception:
+            logger.error(f"Failed to remove orphaned CAR: pk={orphaned_car.pk!r}", exc_info=True)
+            failed += 1
+
+    logger.info(f"Processed {count} orphaned CARs, of which {failed} failed.")
+
+    if failed > 0:
+        raise RuntimeError(f"Failed to expire {failed} orphan CARs")

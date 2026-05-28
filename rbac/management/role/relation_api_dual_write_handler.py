@@ -38,10 +38,15 @@ from management.role.platform import (
     admin_platform_parent_scope_for_seeded_system_role,
     platform_v2_role_uuid_for,
 )
-from management.role.relations import deduplicate_role_permission_relationships, role_child_relationship
+from management.role.relations import (
+    deduplicate_role_permission_relationships,
+    role_child_relationship,
+    role_owner_relationship,
+)
 from management.role.v2_model import CustomRoleV2
 from management.role_binding.model import RoleBinding
 from management.tenant_mapping.model import DefaultAccessType
+from management.tenant_mapping.v2_activation import assert_v1_write_allowed
 from migration_tool.migrate_role import migrate_role, relation_tuples_for_bindings
 from migration_tool.models import V2boundresource
 from migration_tool.sharedSystemRolesReplicatedRoleBindings import v1_perm_to_v2_perm
@@ -322,6 +327,8 @@ class RelationApiDualWriteHandler(BaseRelationApiDualWriteHandler):
             self.default_workspace = Workspace.objects.default(tenant=binding_tenant)
 
             self.resource_service = ImplicitResourceService.from_settings()
+
+            assert_v1_write_allowed(self.tenant)
         except Exception as e:
             logger.error(f"Failed to initialize RelationApiDualWriteHandler with error: {e}")
             raise DualWriteException(e)
@@ -350,6 +357,11 @@ class RelationApiDualWriteHandler(BaseRelationApiDualWriteHandler):
                 return
 
             self.current_role_relations = relation_tuples_for_bindings(self.binding_mappings.values())
+
+            tenant_resource_id = self.tenant.tenant_resource_id()
+            if tenant_resource_id:
+                for v2_role in self.v2_roles.values():
+                    self.current_role_relations.append(role_owner_relationship(v2_role.uuid, tenant_resource_id))
         except Exception as e:
             logger.error(f"Failed to generated relations for v2 role & role bindings: {e}")
             raise DualWriteException(e)
@@ -434,6 +446,11 @@ class RelationApiDualWriteHandler(BaseRelationApiDualWriteHandler):
             self.binding_mappings = _by_pk(migrate_result.binding_mappings)
             self.role_bindings = _by_pk(migrate_result.role_bindings)
             self.v2_roles = _by_pk(migrate_result.v2_roles)
+
+            tenant_resource_id = self.tenant.tenant_resource_id()
+            if tenant_resource_id:
+                for v2_role in self.v2_roles.values():
+                    self.role_relations.append(role_owner_relationship(v2_role.uuid, tenant_resource_id))
 
             return relations
         except Exception as e:

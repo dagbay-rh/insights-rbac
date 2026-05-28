@@ -32,12 +32,13 @@ from management.relation_replicator.relation_replicator import (
     ReplicationEvent,
     ReplicationEventType,
     WorkspaceEvent,
+    WorkspaceEventStream,
 )
 from management.role.model import BindingMapping, Role
 from management.role.v2_model import SeededRoleV2
 from management.role_binding.service import CreateBindingRequest, ExcludeSources, RoleBindingService
 from management.subject import SubjectType
-from management.tenant_mapping.v2_activation import TenantVersion, lock_tenant_version
+from management.tenant_mapping.v2_activation import TenantVersion
 
 from api.models import CrossAccountRequest, Tenant
 
@@ -54,7 +55,7 @@ class _LocalReplicator(RelationReplicator):
         self._handler.relations_to_remove.extend(event.remove)
         self._handler.relations_to_add.extend(event.add)
 
-    def replicate_workspace(self, event: WorkspaceEvent):
+    def replicate_workspace(self, event: WorkspaceEvent, event_stream: WorkspaceEventStream):
         raise NotImplementedError("workspace events not unsupported")
 
 
@@ -91,8 +92,6 @@ class RelationApiDualWriteCrossAccessHandler(RelationApiDualWriteSubjectHandler)
                 event_type=event_type,
                 replicator=replicator,
             )
-
-            self._tenant_version = lock_tenant_version(self.tenant)
         except Exception as e:
             logger.error(
                 f"Error initializing RelationApiDualWriteCrossAccessHandler for request id: "
@@ -156,9 +155,12 @@ class RelationApiDualWriteCrossAccessHandler(RelationApiDualWriteSubjectHandler)
             replicator=_LocalReplicator(self),
             principal_source=str(self._source_key()),
             allow_external_subjects=True,
+            skip_scope_validation=True,
         )
 
     def _add_car_roles_v1(self, roles: set[Role]):
+        self._expect_v1_tenant()
+
         def add_principal_to_binding(mapping: BindingMapping):
             self.relations_to_add.append(mapping.assign_user_to_bindings(user_id, source_key))
 
@@ -224,7 +226,15 @@ class RelationApiDualWriteCrossAccessHandler(RelationApiDualWriteSubjectHandler)
         else:
             raise ValueError(f"Unexpected tenant version: {self._tenant_version!r}")
 
-    def _remove_car_roles_v1(self, roles: set[Role]):
+    def _remove_car_roles_v1(self, roles: set[Role], suppress_migration: bool):
+        """
+        Remove roles for a CAR within a V1 tenant.
+
+        Please see the scary comment in RelationApiDualWriteSubjectHandler._update_mapping_for_system_role before
+        passing suppress_migration=True.
+        """
+        self._expect_v1_tenant()
+
         user_id = self._user_id()
         source_key = self._source_key()
 
@@ -240,6 +250,7 @@ class RelationApiDualWriteCrossAccessHandler(RelationApiDualWriteSubjectHandler)
                     scope=scope,
                     update_mapping=remove_principal_from_binding,
                     create_default_mapping_for_system_role=None,
+                    suppress_migration=suppress_migration,
                 )
 
     @atomic
@@ -288,13 +299,19 @@ class RelationApiDualWriteCrossAccessHandler(RelationApiDualWriteSubjectHandler)
         if len(self.relations_to_add) > 0:
             raise AssertionError(f"Unexpected new relations added in removing CAR: {self.relations_to_add}")
 
-    def generate_relations_to_remove_roles(self, roles: Iterable[Role]):
-        """Generate relations to remove roles."""
+    def generate_relations_to_remove_roles(self, roles: Iterable[Role], *, suppress_v1_migration: bool = False):
+        """
+        Generate relations to remove roles.
+
+        Please see the scary comment in RelationApiDualWriteSubjectHandler._update_mapping_for_system_role about
+        suppress_migration before passing
+        suppress_v1_migration=True.
+        """
         if not self.replication_enabled():
             return
 
         if self._tenant_version == TenantVersion.VERSION_1:
-            self._remove_car_roles_v1(roles=set(roles))
+            self._remove_car_roles_v1(roles=set(roles), suppress_migration=suppress_v1_migration)
         elif self._tenant_version == TenantVersion.VERSION_2:
             self._remove_car_roles_v2(roles=set(roles))
         else:

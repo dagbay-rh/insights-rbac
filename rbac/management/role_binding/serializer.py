@@ -21,6 +21,7 @@ This module contains:
 - Output serializers: For serializing response data
 """
 
+import uuid
 from typing import Optional
 
 from management.models import Group
@@ -32,6 +33,8 @@ from management.role_binding.service import CreateBindingRequest, ExcludeSources
 from management.subject import SubjectType
 from management.utils import FieldSelection, FieldSelectionValidationError
 from rest_framework import serializers
+
+from api.models import Tenant
 
 _SUBJECT_TYPE_GROUP = "group"
 _SUBJECT_TYPE_USER = "user"
@@ -46,6 +49,7 @@ class RoleBindingFieldSelection(FieldSelection):
         "subject": {"id", "type", "group.name", "group.description", "group.user_count", "user.username"},
         "role": {"id", "name"},
         "resource": {"id", "name", "type"},
+        "sources": {"id", "name", "type"},
     }
 
 
@@ -57,16 +61,85 @@ class RoleBindingBySubjectFieldSelection(FieldSelection):
         "subject": {"id", "type", "group.name", "group.description", "group.user_count", "user.username"},
         "roles": {"id", "name"},
         "resource": {"id", "name", "type"},
+        "sources": {"id", "name", "type"},
     }
+
+
+def _normalize_blank_or_none(value: str | None) -> str | None:
+    """Return None for empty/blank values, pass through otherwise."""
+    return (value and value.strip()) or None
+
+
+def _normalize_uuid_or_none(value: str | None) -> uuid.UUID | None:
+    """Return None for empty/blank values, validate and return UUID otherwise.
+
+    Raises serializers.ValidationError for non-empty, non-UUID strings.
+    """
+    if not value or not value.strip():
+        return None
+    try:
+        return uuid.UUID(value.strip())
+    except ValueError as e:
+        raise serializers.ValidationError("Enter a valid UUID.") from e
+
+
+def _validate_resource_identifiers(attrs: dict) -> None:
+    """Validate resource.tenant.org_id vs resource_id/resource_type mutual exclusivity.
+
+    Raises serializers.ValidationError on invalid combinations.
+    Used by both by-subject serializers (GET and PUT).
+    """
+    resource_tenant_org_id = attrs.get("resource_tenant_org_id")
+    resource_id = attrs.get("resource_id")
+    resource_type = attrs.get("resource_type")
+
+    if resource_tenant_org_id:
+        if resource_id:
+            raise serializers.ValidationError("resource.tenant.org_id cannot be combined with resource_id.")
+        if resource_type and resource_type != "tenant":
+            raise serializers.ValidationError(
+                "resource_type must be 'tenant' when resource.tenant.org_id is provided."
+            )
+    else:
+        if not resource_id:
+            raise serializers.ValidationError(
+                {"resource_id": "resource_id is required (or use resource.tenant.org_id)."}
+            )
+        if not resource_type:
+            raise serializers.ValidationError(
+                {"resource_type": "resource_type is required (or use resource.tenant.org_id)."}
+            )
+
+
+def resolve_resource_identifiers(params: dict) -> tuple[str, str]:
+    """Convert resource params (possibly resource_tenant_org_id) to (resource_type, resource_id).
+
+    Used by serializer save() and view methods that need to resolve
+    the resource.tenant.org_id shorthand into concrete resource_type/resource_id.
+    """
+    resource_tenant_org_id = params.get("resource_tenant_org_id")
+    if resource_tenant_org_id:
+        resource_id = Tenant.org_id_to_tenant_resource_id(resource_tenant_org_id)
+        resource_type = params.get("resource_type") or "tenant"
+    else:
+        resource_id = params["resource_id"]
+        resource_type = params["resource_type"]
+    return resource_type, resource_id
 
 
 class RoleBindingInputSerializerMixin:
     """Shared validation methods for role binding input serializers."""
 
+    DOTTED_PARAM_MAP: dict[str, str] = {}
+
     def to_internal_value(self, data):
-        """Sanitize input data by stripping NUL bytes before field validation."""
+        """Remap dotted query param keys and sanitize NUL bytes."""
+        remapped = {key: data[key] for key in data}
+        for dotted, underscored in self.DOTTED_PARAM_MAP.items():
+            if dotted in remapped:
+                remapped[underscored] = remapped.pop(dotted)
         sanitized = {
-            key: value.replace("\x00", "") if isinstance(value, str) else value for key, value in data.items()
+            key: value.replace("\x00", "") if isinstance(value, str) else value for key, value in remapped.items()
         }
         return super().to_internal_value(sanitized)
 
@@ -90,30 +163,122 @@ class RoleBindingListInputSerializer(RoleBindingInputSerializerMixin, serializer
     GET /role-bindings/
     """
 
-    role_id = serializers.UUIDField(required=False, help_text="Filter by role ID")
-    resource_id = serializers.CharField(required=False, max_length=256, help_text="Filter by resource ID")
-    resource_type = serializers.CharField(required=False, help_text="Filter by resource type")
-    subject_type = serializers.CharField(required=False, help_text="Filter by subject type")
-    subject_id = serializers.UUIDField(required=False, help_text="Filter by subject ID")
+    DOTTED_PARAM_MAP = {
+        "resource.tenant.org_id": "resource_tenant_org_id",
+        "granted_subject.principal.user_id": "granted_subject_principal_user_id",
+    }
+
+    role_id = serializers.CharField(required=False, allow_blank=True, help_text="Filter by role ID")
+    resource_id = serializers.CharField(
+        required=False, allow_blank=True, max_length=256, help_text="Filter by resource ID"
+    )
+    resource_type = serializers.CharField(required=False, allow_blank=True, help_text="Filter by resource type")
+    resource_tenant_org_id = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Org ID of the tenant resource to filter by",
+    )
+    subject_type = serializers.CharField(required=False, allow_blank=True, help_text="Filter by subject type")
+    subject_id = serializers.CharField(required=False, allow_blank=True, help_text="Filter by subject ID")
     granted_subject_type = serializers.CharField(
         required=False,
-        help_text="Filter by the type of subject effectively granted access ('user' or 'group')",
+        allow_blank=True,
+        help_text="Filter by the type of subject effectively granted access ('user', 'group', or 'principal')",
     )
     granted_subject_id = serializers.CharField(
         required=False,
-        help_text="ID of the subject effectively granted access (principal UUID, user_id, or group UUID)",
+        allow_blank=True,
+        help_text=("ID effectively granted access: for 'user', principal UUID or user_id; for 'group', group UUID"),
     )
-    fields = serializers.CharField(required=False, help_text="Control which fields are included")
-    order_by = serializers.CharField(required=False, help_text="Sort by specified field(s)")
+    granted_subject_principal_user_id = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="External user ID of the principal effectively granted access",
+    )
+    fields = serializers.CharField(required=False, allow_blank=True, help_text="Control which fields are included")
+    order_by = serializers.CharField(required=False, allow_blank=True, help_text="Sort by specified field(s)")
+    exclude_sources = serializers.ChoiceField(
+        choices=ExcludeSources.values,
+        required=False,
+        allow_blank=True,
+        default=ExcludeSources.NONE,
+        help_text="Exclude bindings: 'none' (default) shows all, 'indirect' hides inherited, 'direct' hides direct. "
+        "Requires both resource_id and resource_type to be specified for inherited binding lookups.",
+    )
+
+    def validate_role_id(self, value: str | None) -> uuid.UUID | None:
+        """Return None for empty values, validate UUID format otherwise."""
+        return _normalize_uuid_or_none(value)
+
+    def validate_subject_id(self, value: str | None) -> uuid.UUID | None:
+        """Return None for empty values, validate UUID format otherwise."""
+        return _normalize_uuid_or_none(value)
+
+    validate_resource_id = staticmethod(_normalize_blank_or_none)
+    validate_resource_type = staticmethod(_normalize_blank_or_none)
+    validate_resource_tenant_org_id = staticmethod(_normalize_blank_or_none)
+    validate_subject_type = staticmethod(_normalize_blank_or_none)
+    validate_granted_subject_type = staticmethod(_normalize_blank_or_none)
+    validate_granted_subject_id = staticmethod(_normalize_blank_or_none)
+    validate_granted_subject_principal_user_id = staticmethod(_normalize_blank_or_none)
+
+    def validate_exclude_sources(self, value):
+        """Map empty string to the default (none = show all)."""
+        return ExcludeSources.NONE if not value else value
 
     def validate(self, attrs):
-        """Cross-field validation for granted_subject and subject params."""
+        """Cross-field validation for exclude_sources, granted_subject, resource, and subject params."""
         attrs = super().validate(attrs)
 
+        # Validate exclude_sources with resource_id/resource_type
+        exclude_sources = attrs.get("exclude_sources", ExcludeSources.NONE)
+        resource_id = attrs.get("resource_id")
+        resource_type = attrs.get("resource_type")
+
+        # resource.tenant.org_id validations
+        resource_tenant_org_id = attrs.get("resource_tenant_org_id")
+        if resource_tenant_org_id:
+            if resource_id:
+                raise serializers.ValidationError("resource.tenant.org_id cannot be combined with resource_id.")
+            if resource_type and resource_type != "tenant":
+                raise serializers.ValidationError(
+                    "resource_type must be 'tenant' when resource.tenant.org_id is provided."
+                )
+
+        # Inherited binding lookups require both resource_id and resource_type.
+        # This applies when exclude_sources is 'none' (include all) or 'direct' (inherited only).
+        # When exclude_sources is 'indirect', only direct bindings are returned, so no lookup needed.
+        # Skip this check when resource_tenant_org_id is provided, as it will be converted to resource_id in the view.
+        needs_inherited_lookup = exclude_sources in (ExcludeSources.NONE, ExcludeSources.DIRECT)
+        if needs_inherited_lookup and not resource_tenant_org_id:
+            if resource_id and not resource_type:
+                raise serializers.ValidationError(
+                    {
+                        "resource_type": "resource_type is required when resource_id is specified "
+                        "and exclude_sources is not 'indirect'."
+                    }
+                )
+            if resource_type and not resource_id:
+                raise serializers.ValidationError(
+                    {
+                        "resource_id": "resource_id is required when resource_type is specified "
+                        "and exclude_sources is not 'indirect'."
+                    }
+                )
+
+        # Validate granted_subject params
         granted_type = attrs.get("granted_subject_type")
         granted_id = attrs.get("granted_subject_id")
+        granted_principal_user_id = attrs.get("granted_subject_principal_user_id")
 
-        if bool(granted_type) != bool(granted_id):
+        # granted_subject.principal.user_id requires granted_subject_type=principal
+        if granted_principal_user_id and granted_type != SubjectType.PRINCIPAL:
+            raise serializers.ValidationError(
+                "granted_subject_type must be 'principal' when granted_subject.principal.user_id is provided."
+            )
+
+        # granted_subject_id without granted_subject_type is invalid
+        if granted_id and not granted_type:
             raise serializers.ValidationError(
                 "Both granted_subject_type and granted_subject_id must be provided together."
             )
@@ -127,18 +292,36 @@ class RoleBindingListInputSerializer(RoleBindingInputSerializerMixin, serializer
                 raise serializers.ValidationError(
                     "granted_subject_type/granted_subject_id cannot be combined with subject_type/subject_id."
                 )
+            if granted_type in (SubjectType.USER, SubjectType.GROUP) and not granted_id:
+                raise serializers.ValidationError(
+                    "granted_subject_id is required when granted_subject_type is 'user' or 'group'."
+                )
+            if granted_type == SubjectType.PRINCIPAL and not granted_principal_user_id:
+                raise serializers.ValidationError(
+                    "granted_subject.principal.user_id is required when granted_subject_type is 'principal'."
+                )
 
         return attrs
 
 
-class RoleBindingInputSerializer(serializers.Serializer):
-    """Input serializer for role binding query parameters.
+class RoleBindingInputSerializer(RoleBindingInputSerializerMixin, serializers.Serializer):
+    """Input serializer for role binding by-subject query parameters.
 
-    Handles validation of query parameters for the role binding API.
+    Handles validation of query parameters for GET /role-bindings/by-subject/.
+    Supports resource.tenant.org_id as an alternative to resource_id + resource_type.
     """
 
-    resource_id = serializers.CharField(required=True, help_text="Filter by resource ID")
-    resource_type = serializers.CharField(required=True, help_text="Filter by resource type")
+    DOTTED_PARAM_MAP = {
+        "resource.tenant.org_id": "resource_tenant_org_id",
+    }
+
+    resource_id = serializers.CharField(required=False, allow_blank=True, help_text="Filter by resource ID")
+    resource_type = serializers.CharField(required=False, allow_blank=True, help_text="Filter by resource type")
+    resource_tenant_org_id = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Org ID of the tenant resource to filter by",
+    )
     subject_type = serializers.CharField(required=False, allow_blank=True, help_text="Filter by subject type")
     subject_id = serializers.CharField(required=False, allow_blank=True, help_text="Filter by subject ID (UUID)")
     fields = serializers.CharField(required=False, allow_blank=True, help_text="Control which fields are included")
@@ -150,34 +333,17 @@ class RoleBindingInputSerializer(serializers.Serializer):
         help_text="Exclude bindings: 'none' (default) shows all, 'indirect' hides inherited, 'direct' hides direct",
     )
 
-    def to_internal_value(self, data):
-        """Sanitize input data by stripping NUL bytes before field validation."""
-        sanitized = {
-            key: value.replace("\x00", "") if isinstance(value, str) else value for key, value in data.items()
-        }
-        return super().to_internal_value(sanitized)
+    validate_resource_id = staticmethod(_normalize_blank_or_none)
+    validate_resource_type = staticmethod(_normalize_blank_or_none)
+    validate_resource_tenant_org_id = staticmethod(_normalize_blank_or_none)
+    validate_subject_type = staticmethod(_normalize_blank_or_none)
+    validate_subject_id = staticmethod(_normalize_blank_or_none)
 
-    def validate_resource_id(self, value):
-        """Validate resource_id is provided."""
-        if not value:
-            raise serializers.ValidationError("resource_id is required to identify the resource for role bindings.")
-        return value
-
-    def validate_resource_type(self, value):
-        """Validate resource_type is provided."""
-        if not value:
-            raise serializers.ValidationError(
-                "resource_type is required to specify the type of resource (e.g., 'workspace')."
-            )
-        return value
-
-    def validate_subject_type(self, value):
-        """Return None for empty values."""
-        return value or None
-
-    def validate_subject_id(self, value):
-        """Return None for empty values."""
-        return value or None
+    def validate(self, attrs):
+        """Cross-field validation for resource params."""
+        attrs = super().validate(attrs)
+        _validate_resource_identifiers(attrs)
+        return attrs
 
     def validate_fields(self, value):
         """Parse and validate fields parameter using by-subject selection."""
@@ -187,10 +353,6 @@ class RoleBindingInputSerializer(serializers.Serializer):
             return RoleBindingBySubjectFieldSelection.parse(value)
         except FieldSelectionValidationError as e:
             raise serializers.ValidationError(e.message)
-
-    def validate_order_by(self, value):
-        """Return None for empty values."""
-        return value or None
 
 
 class RoleBindingOutputSerializer(serializers.Serializer):
@@ -208,12 +370,14 @@ class RoleBindingOutputSerializer(serializers.Serializer):
     - role(name, description) - accesses role.name, role.description
     - resource(name, type) - accesses resource name and type from context
     - last_modified - include root-level field
+    - sources(name, type) - accesses sources with optional name and type
     """
 
     last_modified = serializers.SerializerMethodField()
     subject = serializers.SerializerMethodField()
     roles = serializers.SerializerMethodField()
     resource = serializers.SerializerMethodField()
+    sources = serializers.SerializerMethodField()
 
     def _get_field_selection(self):
         """Get field selection from context."""
@@ -236,6 +400,10 @@ class RoleBindingOutputSerializer(serializers.Serializer):
             "roles": ret.get("roles"),
             "resource": ret.get("resource"),
         }
+
+        # Include sources only if no field selection, or if explicitly requested
+        if field_selection is None or "sources" in field_selection.nested_fields:
+            filtered["sources"] = ret.get("sources")
 
         # Include last_modified only if explicitly requested
         if field_selection and "last_modified" in field_selection.root_fields:
@@ -455,6 +623,52 @@ class RoleBindingOutputSerializer(serializers.Serializer):
 
         return resource_data
 
+    def get_sources(self, obj):
+        """Extract sources information indicating where role bindings are attached.
+
+        For by-subject endpoints, a subject may have bindings from multiple resources
+        (direct and inherited). This returns the unique list of resources where bindings
+        are attached.
+
+        Default (no fields param): Returns only source id.
+        With fields param: id is always included, plus explicitly requested fields (name, type).
+        """
+        if isinstance(obj, dict):
+            return obj.get("sources", [])
+
+        field_selection = self._get_field_selection()
+
+        # Get all binding entries from the subject's filtered_bindings
+        binding_entries = self._get_binding_entries(obj)
+
+        # Extract unique sources from bindings
+        seen_sources = set()
+        sources = []
+
+        for binding_entry in binding_entries:
+            if not hasattr(binding_entry, "binding") or not binding_entry.binding:
+                continue
+
+            binding = binding_entry.binding
+            source_key = (binding.resource_type, binding.resource_id)
+
+            if source_key in seen_sources:
+                continue
+            seen_sources.add(source_key)
+
+            source_data: dict = {"id": binding.resource_id}
+
+            if field_selection is not None:
+                source_fields = field_selection.get_nested("sources")
+                if "type" in source_fields:
+                    source_data["type"] = binding.resource_type
+                if "name" in source_fields:
+                    source_data["name"] = getattr(binding, "resource_name", None)
+
+            sources.append(source_data)
+
+        return sources
+
 
 # Backward compatibility alias
 RoleBindingByGroupSerializer = RoleBindingOutputSerializer
@@ -562,7 +776,7 @@ class RoleBindingOutputSerializerMixin:
 class RoleBindingListOutputSerializer(RoleBindingOutputSerializerMixin, serializers.Serializer):
     """Output serializer for the role binding list endpoint.
 
-    Handles RoleBinding objects and returns {role, subject, resource}.
+    Handles RoleBinding objects and returns {role, subject, resource, sources}.
 
     Supports dynamic field selection through the 'field_selection' context parameter.
     Fields are accessed directly on the model using dot notation from the query parameter.
@@ -572,11 +786,13 @@ class RoleBindingListOutputSerializer(RoleBindingOutputSerializerMixin, serializ
     - role(name) - accesses role.name
     - resource(name, type) - display name via ``RoleBindingQuerySet.with_resource_names()`` annotation;
       type from the binding
+    - sources(name, type) - accesses sources with optional name and type
     """
 
     subject = serializers.SerializerMethodField()
     role = serializers.SerializerMethodField()
     resource = serializers.SerializerMethodField()
+    sources = serializers.SerializerMethodField()
 
     def get_subject(self, obj: RoleBinding):
         """Extract subject information from the RoleBinding.
@@ -645,6 +861,30 @@ class RoleBindingListOutputSerializer(RoleBindingOutputSerializerMixin, serializ
 
         return resource_data
 
+    def get_sources(self, obj: RoleBinding):
+        """Extract sources information indicating where the role binding is attached.
+
+        Returns a list of resources from which this role binding is sourced.
+        For direct bindings, this is the binding's own resource.
+        For inherited bindings, this is the parent resource where the binding is attached.
+
+        Default (no fields param): Returns only source id.
+        With fields param: id is always included, plus explicitly requested fields (name, type).
+        """
+        field_selection = self._get_field_selection()
+
+        # The source is always the resource where the binding is actually attached
+        source_data: dict = {"id": obj.resource_id}
+
+        if field_selection is not None:
+            source_fields = field_selection.get_nested("sources")
+            if "type" in source_fields:
+                source_data["type"] = obj.resource_type
+            if "name" in source_fields:
+                source_data["name"] = getattr(obj, "resource_name", None)
+
+        return [source_data]
+
 
 class ResourceInputSerializer(serializers.Serializer):
     """Validates the resource portion of a role binding request."""
@@ -673,7 +913,7 @@ class BatchCreateRoleBindingRequestSerializer(serializers.Serializer):
 
     service_class = RoleBindingService
 
-    DEFAULT_FIELDS = "resource(id),role(id),subject(id,type)"
+    DEFAULT_FIELDS = "resource(id,type),role(id),subject(id,type)"
 
     requests = CreateRoleBindingItemSerializer(many=True, min_length=1, max_length=100)
     fields = serializers.CharField(
@@ -725,7 +965,9 @@ class RoleBindingFieldMaskingMixin:
     * Default (no ``field_selection``): subject returns ``id`` + ``type``;
       roles returns ``id`` only; resource returns ``id`` only.
     * With ``field_selection``: only explicitly requested fields appear
-      and unrequested top-level sections are stripped entirely.
+      and unrequested top-level sections are stripped entirely. Subject
+      objects always include ``type`` (OpenAPI discriminator for
+      UserSubject | GroupSubject) even when not listed in ``fields``.
     """
 
     def __init__(self, *args, **kwargs):
@@ -762,8 +1004,8 @@ class RoleBindingFieldMaskingMixin:
         subject = {}
         subject_fields = field_selection.get_nested("subject")
 
-        if "type" in subject_fields:
-            subject["type"] = subject_type
+        # UserSubject / GroupSubject require ``type`` for valid JSON and generated clients.
+        subject["type"] = subject_type
         if "id" in subject_fields:
             subject["id"] = subject_obj.uuid
 
@@ -856,15 +1098,29 @@ class BatchCreateRoleBindingResponseItemSerializer(RoleBindingFieldMaskingMixin,
 class UpdateRoleBindingRequestSerializer(RoleBindingInputSerializerMixin, serializers.Serializer):
     """Input serializer for update role binding API.
 
-    Inherits from ``RoleBindingInputSerializerMixin`` for shared NUL-byte
-    sanitization (``to_internal_value``) and ``validate_fields``.
+    Inherits from ``RoleBindingInputSerializerMixin`` for shared dotted-param
+    remapping, NUL-byte sanitization, and ``validate_fields``.
+    Supports resource.tenant.org_id as an alternative to resource_id + resource_type.
     """
 
-    DEFAULT_FIELDS = "resource(id),subject(id),roles(id)"
+    DOTTED_PARAM_MAP = {
+        "resource.tenant.org_id": "resource_tenant_org_id",
+    }
+
+    DEFAULT_FIELDS = "resource(id),subject(id,type),roles(id)"
 
     # Query parameters
-    resource_id = serializers.CharField(required=True, help_text="Resource ID to update bindings for")
-    resource_type = serializers.CharField(required=True, help_text="Resource type (e.g., 'workspace')")
+    resource_id = serializers.CharField(
+        required=False, allow_blank=True, help_text="Resource ID to update bindings for"
+    )
+    resource_type = serializers.CharField(
+        required=False, allow_blank=True, help_text="Resource type (e.g., 'workspace')"
+    )
+    resource_tenant_org_id = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Org ID of the tenant resource to update bindings for",
+    )
     subject_id = serializers.CharField(required=True, help_text="Subject ID (UUID)")
     subject_type = serializers.CharField(required=True, help_text="Subject type (e.g., 'group')")
     fields = serializers.CharField(
@@ -873,6 +1129,10 @@ class UpdateRoleBindingRequestSerializer(RoleBindingInputSerializerMixin, serial
 
     # Request body
     roles = RoleIdSerializer(many=True, required=True, help_text="Roles to assign")
+
+    validate_resource_id = staticmethod(_normalize_blank_or_none)
+    validate_resource_type = staticmethod(_normalize_blank_or_none)
+    validate_resource_tenant_org_id = staticmethod(_normalize_blank_or_none)
 
     def validate_fields(self, value):
         """Parse and validate fields parameter using by-subject selection."""
@@ -883,12 +1143,20 @@ class UpdateRoleBindingRequestSerializer(RoleBindingInputSerializerMixin, serial
         except FieldSelectionValidationError as e:
             raise serializers.ValidationError(e.message)
 
+    SUPPORTED_SUBJECT_TYPES = (SubjectType.GROUP, SubjectType.USER)
+
     def validate_subject_type(self, value):
-        """Validate subject_type is a supported enum value."""
-        if not SubjectType.is_valid(value):
-            supported = ", ".join(SubjectType.values())
+        """Validate subject_type is a supported enum value for by-subject operations."""
+        if value not in self.SUPPORTED_SUBJECT_TYPES:
+            supported = ", ".join(self.SUPPORTED_SUBJECT_TYPES)
             raise serializers.ValidationError(f"Unsupported subject type: '{value}'. Supported types: {supported}")
         return value
+
+    def validate(self, attrs):
+        """Cross-field validation for resource params."""
+        attrs = super().validate(attrs)
+        _validate_resource_identifiers(attrs)
+        return attrs
 
     def save(self):
         """Execute the update via the service layer and return the result.
@@ -902,9 +1170,11 @@ class UpdateRoleBindingRequestSerializer(RoleBindingInputSerializerMixin, serial
         role_ids = [str(role["id"]) for role in validated["roles"]]
         service = RoleBindingService(tenant=tenant)
 
+        resource_type, resource_id = resolve_resource_identifiers(validated)
+
         return service.update_role_bindings_for_subject(
-            resource_type=validated["resource_type"],
-            resource_id=validated["resource_id"],
+            resource_type=resource_type,
+            resource_id=resource_id,
             subject_type=validated["subject_type"],
             subject_id=validated["subject_id"],
             role_ids=role_ids,

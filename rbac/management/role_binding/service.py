@@ -28,7 +28,12 @@ from management.atomic_transactions import atomic
 from management.exceptions import InvalidFieldError, NotFoundError, RequiredFieldError
 from management.group.model import Group
 from management.group.platform import DefaultGroupNotAvailableError, GlobalPolicyIdService
-from management.permission.scope_service import Scope
+from management.permission.scope_service import (
+    SCOPE_DISPLAY_NAME,
+    Scope,
+    default_implicit_resource_service,
+    scope_for_resource,
+)
 from management.principal.model import Principal
 from management.relation_replicator.noop_replicator import NoopReplicator
 from management.relation_replicator.outbox_replicator import OutboxReplicator
@@ -97,16 +102,45 @@ class RoleBindingService:
         replicator: RelationReplicator | None = None,
         principal_source: str = API_PRINCIPAL_SOURCE,
         allow_external_subjects: bool = False,
+        skip_scope_validation: bool = False,
     ):
         """Initialize the service with a tenant and optional replicator."""
         self.tenant = tenant
         self._principal_source = principal_source
         self._allow_external_subjects = allow_external_subjects
+        self._skip_scope_validation = skip_scope_validation
 
         if settings.REPLICATION_TO_RELATION_ENABLED:
             self._replicator = replicator if replicator is not None else OutboxReplicator()
         else:
             self._replicator = NoopReplicator()
+
+    def _resolve_inherited_bindings(
+        self,
+        exclude_sources: ExcludeSources,
+        resource_type: Optional[str],
+        resource_id: Optional[str],
+    ) -> tuple[Optional[list[str]], bool]:
+        """Resolve inherited binding UUIDs based on exclude_sources parameter.
+
+        Args:
+            exclude_sources: ExcludeSources enum value controlling which bindings to include
+            resource_type: The resource type (required for inherited lookups)
+            resource_id: The resource ID (required for inherited lookups)
+
+        Returns:
+            Tuple of (binding_uuids, exclude_direct):
+            - binding_uuids: List of inherited binding UUIDs, or None if not applicable
+            - exclude_direct: True if direct bindings should be excluded
+        """
+        exclude_direct = exclude_sources == ExcludeSources.DIRECT
+        include_inherited = exclude_sources in (ExcludeSources.DIRECT, ExcludeSources.NONE)
+
+        binding_uuids = None
+        if include_inherited and resource_type and resource_id:
+            binding_uuids = self._lookup_binding_uuids_via_relations(resource_type, str(resource_id))
+
+        return binding_uuids, exclude_direct
 
     def get_role_bindings_by_subject(self, params: dict) -> QuerySet:
         """Get role bindings grouped by subject from a dictionary of parameters.
@@ -131,12 +165,7 @@ class RoleBindingService:
         # Ensure default bindings exist (lazy creation)
         self._ensure_default_bindings_exist()
 
-        binding_uuids = None
-        exclude_direct = exclude_sources == ExcludeSources.DIRECT
-        include_inherited = exclude_sources in (ExcludeSources.DIRECT, ExcludeSources.NONE)
-
-        if include_inherited:
-            binding_uuids = self._lookup_binding_uuids_via_relations(resource_type, resource_id)
+        binding_uuids, exclude_direct = self._resolve_inherited_bindings(exclude_sources, resource_type, resource_id)
 
         if subject_type == SubjectType.USER:
             # Build user queryset
@@ -150,6 +179,69 @@ class RoleBindingService:
                 resource_id, resource_type, binding_uuids, exclude_direct=exclude_direct
             )
             queryset = self._apply_subject_filters(queryset, subject_type, subject_id)
+
+        return queryset
+
+    def get_role_bindings_for_list(self, params: dict) -> QuerySet:
+        """Get role bindings for the list endpoint with inherited binding support.
+
+        Args:
+            params: Dictionary of validated query parameters (from input serializer)
+                - role_id: Optional role UUID filter
+                - resource_id: Optional resource ID filter
+                - resource_type: Optional resource type filter
+                - subject_type: Optional subject type filter
+                - subject_id: Optional subject ID filter
+                - exclude_sources: ExcludeSources enum value
+
+        Returns:
+            QuerySet of RoleBinding objects
+
+        Note:
+            Ordering is handled by V2CursorPagination.get_ordering() to ensure
+            cursor pagination works correctly with the requested order_by parameter.
+        """
+        resource_id = params.get("resource_id")
+        resource_type = params.get("resource_type")
+        exclude_sources = params.get("exclude_sources", ExcludeSources.NONE)
+
+        binding_uuids, exclude_direct = self._resolve_inherited_bindings(exclude_sources, resource_type, resource_id)
+
+        # Handle edge case: exclude_direct but no inherited bindings available
+        if exclude_direct and binding_uuids is None:
+            # Relations API failed or not configured — cannot determine inherited bindings
+            return RoleBinding.objects.for_tenant(self.tenant).none()
+
+        queryset = RoleBinding.objects.for_tenant(self.tenant)
+
+        # Apply role filter
+        role_id = params.get("role_id")
+        if role_id:
+            queryset = queryset.for_role(role_id)
+
+        # Apply subject filters
+        queryset = queryset.for_subject(
+            subject_type=params.get("subject_type"),
+            subject_id=params.get("subject_id"),
+        )
+
+        # Build resource filter based on exclude_sources logic
+        if exclude_direct and binding_uuids is not None:
+            # Only inherited bindings by UUID (exclude direct)
+            queryset = queryset.filter(
+                Q(uuid__in=binding_uuids) & ~Q(resource_type=resource_type, resource_id=str(resource_id))
+            )
+        elif binding_uuids is not None and resource_id and resource_type:
+            # Both direct and inherited bindings (exclude_sources=none)
+            queryset = queryset.filter(
+                Q(resource_type=resource_type, resource_id=str(resource_id)) | Q(uuid__in=binding_uuids)
+            )
+        else:
+            # Only direct bindings (exclude_sources=indirect or no resource filter)
+            queryset = queryset.for_resource_filter(
+                resource_type=resource_type,
+                resource_id=str(resource_id) if resource_id else None,
+            )
 
         return queryset
 
@@ -211,6 +303,9 @@ class RoleBindingService:
 
         for resource_type, resource_id in {(r.resource_type, r.resource_id) for r in requests}:
             self._validate_resource(resource_type, resource_id)
+
+        for req in requests:
+            self._validate_role_scopes([roles_by_uuid[req.role_id]], req.resource_type, req.resource_id)
 
         access_groups = self._group_by_subject_resource(requests, roles_by_uuid)
         all_tuples_to_add: list[RelationTuple] = []
@@ -356,7 +451,10 @@ class RoleBindingService:
             exclude_direct=exclude_direct,
         )
         binding_queryset = (
-            RoleBinding.objects.filter(binding_filter_q).select_related("role").prefetch_related("role__children")
+            RoleBinding.objects.filter(binding_filter_q)
+            .select_related("role")
+            .prefetch_related("role__children")
+            .with_resource_names()
         )
 
         # Prefetch the join table entries with the filtered bindings
@@ -528,7 +626,12 @@ class RoleBindingService:
 
         # Prefetch RoleBindingPrincipal entries with their bindings
         principal_entry_queryset = RoleBindingPrincipal.objects.filter(principal_entry_filter).prefetch_related(
-            Prefetch("binding", queryset=RoleBinding.objects.select_related("role").prefetch_related("role__children"))
+            Prefetch(
+                "binding",
+                queryset=RoleBinding.objects.select_related("role")
+                .prefetch_related("role__children")
+                .with_resource_names(),
+            )
         )
 
         # Prefetch role_binding_entries on Principal
@@ -841,6 +944,40 @@ class RoleBindingService:
         except Exception as e:
             logger.error(f"Failed to restore default bindings for tenant {self.tenant.org_id}: {e}")
 
+    def _maybe_customize_default_group(self, subject: Subject) -> Subject:
+        """If subject is the public tenant's default access group, customize it for this tenant.
+
+        When modifying role bindings for the public tenant's system default access group,
+        we create a tenant-specific custom default access group (mirroring the V1 behavior
+        in clone_default_group_in_public_schema).
+
+        If the tenant already has a custom default group, returns that instead.
+
+        Returns the original subject unchanged when it is not the public default group.
+        """
+        if not subject.is_group:
+            return subject
+        group = subject.entity
+        if group.admin_default:
+            raise InvalidFieldError(
+                "subject_id",
+                "Role bindings for the admin default group cannot be modified.",
+            )
+        if not (group.platform_default and group.system):
+            return subject
+
+        existing_custom = Group.objects.filter(platform_default=True, tenant=self.tenant).first()
+        if existing_custom is not None:
+            return Subject(type=SubjectType.GROUP, entity=existing_custom)
+
+        from management.group.definer import clone_default_group_in_public_schema
+
+        custom_group = clone_default_group_in_public_schema(group, self.tenant)
+        if custom_group is None:
+            raise RuntimeError(f"Failed to create custom default access group for tenant {self.tenant.org_id}")
+
+        return Subject(type=SubjectType.GROUP, entity=custom_group)
+
     @atomic
     def update_role_bindings_for_subject(
         self,
@@ -854,6 +991,10 @@ class RoleBindingService:
 
         This replaces all existing role bindings for the subject on the resource
         with the provided roles.
+
+        If the subject is the public tenant's default access group, it is first
+        cloned into a tenant-specific custom default access group (matching the
+        V1 behavior), and the role binding update is applied to that custom group.
 
         Args:
             resource_type: The type of resource (e.g., 'workspace')
@@ -874,8 +1015,12 @@ class RoleBindingService:
         ensure_v2_write_activated(self.tenant)
 
         roles = self._get_roles(role_ids)
+        self._validate_role_scopes(roles, resource_type, resource_id)
 
         subject = Subject.objects.by_type(type=subject_type, id=subject_id)
+
+        subject = self._maybe_customize_default_group(subject)
+
         self._validate_subject(subject.entity)
 
         self._replace_role_bindings(
@@ -961,6 +1106,43 @@ class RoleBindingService:
             raise InvalidFieldError("roles", f"The following roles do not exist: {', '.join(missing)}")
 
         return roles
+
+    def _validate_role_scopes(self, roles: list[RoleV2], resource_type: str, resource_id: str) -> None:
+        """Validate that each role's highest scope matches the target resource.
+
+        Uses ``ImplicitResourceService.highest_scope_for_permissions`` to compute
+        the scope from each role's permission strings.
+
+        Must be called after ``_validate_resource`` which ensures the resource
+        exists. Empty *roles* is valid (means "unbind all") and skips the check.
+
+        Raises:
+            InvalidFieldError: If any role's scope does not match the resource.
+            NotFoundError: If the resource cannot be resolved to a scope (should
+                not happen when ``_validate_resource`` ran first).
+        """
+        if self._skip_scope_validation or not roles:
+            return
+
+        expected = scope_for_resource(resource_type, resource_id, self.tenant)
+        if expected is None:
+            if resource_type in ("workspace", "tenant"):
+                raise NotFoundError(resource_type, resource_id)
+            return
+
+        mismatched: list[str] = []
+        for role in roles:
+            perm_strings = list(role.permissions.values_list("permission", flat=True))
+            role_scope = default_implicit_resource_service.highest_scope_for_permissions(perm_strings)
+            if role_scope != expected:
+                mismatched.append(f"{role.name} ({role.uuid})")
+
+        if mismatched:
+            scope_label = SCOPE_DISPLAY_NAME[expected]
+            raise InvalidFieldError(
+                "roles",
+                f"The following roles are not scoped for this resource ({scope_label}): {', '.join(mismatched)}",
+            )
 
     def _replace_role_bindings(
         self,
