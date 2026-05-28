@@ -33,9 +33,8 @@ Corrective event logic (truth table):
 import logging
 from typing import TypedDict
 
-from django.db import transaction
-
 from core.kafka_dr import KafkaEvent
+from django.db import transaction
 from management.models import Outbox
 from management.relation_replicator.outbox_replicator import OutboxLog, OutboxWAL, WorkspaceEventPayload
 from management.relation_replicator.relation_replicator import (
@@ -209,9 +208,7 @@ def generate_corrective_workspace_events(
                     if existing_ws is not None:
                         _write_existing_ws_corrective(existing_ws, "create", outbox_log)
                         stats["corrective_creates"] += 1
-                        logger.info(
-                            "Wrote create corrective for missing workspace %s (delete + exists in DB)", ws_id
-                        )
+                        logger.info("Wrote create corrective for missing workspace %s (delete + exists in DB)", ws_id)
                     else:
                         stats["skipped"] += 1
 
@@ -219,15 +216,11 @@ def generate_corrective_workspace_events(
                     if existing_ws is not None:
                         _write_existing_ws_corrective(existing_ws, "update", outbox_log)
                         stats["corrective_updates"] += 1
-                        logger.info(
-                            "Wrote update corrective for stale workspace %s (update + exists in DB)", ws_id
-                        )
+                        logger.info("Wrote update corrective for stale workspace %s (update + exists in DB)", ws_id)
                     else:
                         _write_delete_corrective(event, outbox_log)
                         stats["corrective_deletes"] += 1
-                        logger.info(
-                            "Wrote delete corrective for orphaned workspace %s (update + not in DB)", ws_id
-                        )
+                        logger.info("Wrote delete corrective for orphaned workspace %s (update + not in DB)", ws_id)
 
         except Exception as e:
             stats["errors"] += 1

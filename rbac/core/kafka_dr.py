@@ -169,6 +169,22 @@ def read_events_by_timestamp(
                     "Error processing Kafka message at offset %d partition %d", message.offset, message.partition
                 )
 
+        partition_stats: dict[int, list[int]] = {}
+        for ev in events:
+            partition_stats.setdefault(ev.partition, []).append(ev.offset)
+        for part, offsets in sorted(partition_stats.items()):
+            logger.info(
+                "Partition %d: %d events, offsets [%d, %d]",
+                part,
+                len(offsets),
+                min(offsets),
+                max(offsets),
+            )
+        if not events:
+            logger.info(
+                "No events matched in topic %s for window [%d, %d]", topic, start_timestamp_ms, end_timestamp_ms
+            )
+
     finally:
         consumer.close()
 

@@ -18,6 +18,7 @@
 
 from __future__ import absolute_import, unicode_literals
 
+import datetime
 import logging
 import time
 from typing import Optional
@@ -553,3 +554,80 @@ def run_kessel_parity_checks_in_worker():
 
     stats["timing"] = timing_stats
     return stats
+
+
+@shared_task
+def recover_workspace_events_in_worker(
+    restore_timestamp_iso: str,
+    buffer_minutes: int = 5,
+) -> dict:
+    """Celery task to generate corrective workspace events after a DB restore.
+
+    Reads workspace events from Kafka for the data loss window, compares against
+    current RBAC DB state, and writes corrective events to the outbox table.
+
+    Args:
+        restore_timestamp_iso: ISO 8601 timestamp of the DB restore point (T-30).
+        buffer_minutes: Minutes to extend the window before restore_timestamp.
+
+    Returns:
+        dict: Summary statistics of corrective events generated.
+    """
+    if not getattr(settings, "DR_RECOVERY_ENABLED", False):
+        return {"message": "DR recovery disabled (DR_RECOVERY_ENABLED=False)"}
+
+    from django.core.cache import cache
+
+    lock_key = "dr_workspace_recovery_lock"
+    if not cache.add(lock_key, "running", timeout=3600):
+        return {"message": "A workspace DR recovery task is already in progress"}
+
+    start = time.monotonic()
+
+    try:
+        restore_dt = datetime.datetime.fromisoformat(restore_timestamp_iso)
+        if restore_dt.tzinfo is None:
+            restore_dt = restore_dt.replace(tzinfo=datetime.timezone.utc)
+
+        buffer_delta = datetime.timedelta(minutes=buffer_minutes)
+        start_dt = restore_dt - buffer_delta
+        end_dt = datetime.datetime.now(datetime.timezone.utc)
+
+        start_ms = int(start_dt.timestamp() * 1000)
+        end_ms = int(end_dt.timestamp() * 1000)
+
+        topic = getattr(settings, "DR_WORKSPACE_TOPIC", "outbox.event.workspace")
+
+        logger.info(
+            "Starting workspace DR recovery: topic=%s start=%s end=%s buffer_minutes=%d",
+            topic,
+            start_dt.isoformat(),
+            end_dt.isoformat(),
+            buffer_minutes,
+        )
+
+        from core.kafka_dr import read_events_by_timestamp
+        from management.workspace.dr_recovery import generate_corrective_workspace_events
+
+        kafka_events = read_events_by_timestamp(
+            topic=topic,
+            start_timestamp_ms=start_ms,
+            end_timestamp_ms=end_ms,
+        )
+
+        logger.info("Read %d Kafka events from topic %s", len(kafka_events), topic)
+
+        stats = generate_corrective_workspace_events(kafka_events)
+
+        elapsed = time.monotonic() - start
+        result = dict(stats)
+        result["duration_seconds"] = round(elapsed, 3)
+        result["restore_timestamp"] = restore_timestamp_iso
+        result["buffer_minutes"] = buffer_minutes
+        result["kafka_events_read"] = len(kafka_events)
+
+        logger.info("Workspace DR recovery task completed in %.3fs: %s", elapsed, result)
+
+        return result
+    finally:
+        cache.delete(lock_key)
