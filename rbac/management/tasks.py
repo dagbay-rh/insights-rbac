@@ -560,6 +560,7 @@ def run_kessel_parity_checks_in_worker():
 def recover_workspace_events_in_worker(
     restore_timestamp_iso: str,
     buffer_minutes: int = 5,
+    dry_run: bool = False,
 ) -> dict:
     """Celery task to generate corrective workspace events after a DB restore.
 
@@ -617,7 +618,7 @@ def recover_workspace_events_in_worker(
 
         logger.info("Read %d Kafka events from topic %s", len(kafka_events), topic)
 
-        stats = generate_corrective_workspace_events(kafka_events)
+        stats = generate_corrective_workspace_events(kafka_events, dry_run=dry_run)
 
         elapsed = time.monotonic() - start
         result = dict(stats)

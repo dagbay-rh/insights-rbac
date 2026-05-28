@@ -148,6 +148,7 @@ def _write_corrective_event(
 def generate_corrective_workspace_events(
     kafka_events: list[KafkaEvent],
     outbox_log: OutboxLog | None = None,
+    dry_run: bool = False,
 ) -> CorrectiveEventStats:
     """Generate corrective workspace events based on Kafka events vs current DB state.
 
@@ -195,32 +196,43 @@ def generate_corrective_workspace_events(
         existing_ws = workspace_lookup.get(ws_id)
 
         try:
-            with transaction.atomic():
-                if operation == "create":
-                    if existing_ws is None:
-                        _write_delete_corrective(event, outbox_log)
-                        stats["corrective_deletes"] += 1
-                        logger.info("Wrote delete corrective for orphaned workspace %s (create + not in DB)", ws_id)
+            if operation == "create":
+                if existing_ws is None:
+                    if dry_run:
+                        logger.info("DRY RUN: would write delete corrective for orphaned workspace %s", ws_id)
                     else:
-                        stats["skipped"] += 1
+                        with transaction.atomic():
+                            _write_delete_corrective(event, outbox_log)
+                    stats["corrective_deletes"] += 1
+                else:
+                    stats["skipped"] += 1
 
-                elif operation == "delete":
-                    if existing_ws is not None:
-                        _write_existing_ws_corrective(existing_ws, "create", outbox_log)
-                        stats["corrective_creates"] += 1
-                        logger.info("Wrote create corrective for missing workspace %s (delete + exists in DB)", ws_id)
+            elif operation == "delete":
+                if existing_ws is not None:
+                    if dry_run:
+                        logger.info("DRY RUN: would write create corrective for missing workspace %s", ws_id)
                     else:
-                        stats["skipped"] += 1
+                        with transaction.atomic():
+                            _write_existing_ws_corrective(existing_ws, "create", outbox_log)
+                    stats["corrective_creates"] += 1
+                else:
+                    stats["skipped"] += 1
 
-                elif operation == "update":
-                    if existing_ws is not None:
-                        _write_existing_ws_corrective(existing_ws, "update", outbox_log)
-                        stats["corrective_updates"] += 1
-                        logger.info("Wrote update corrective for stale workspace %s (update + exists in DB)", ws_id)
+            elif operation == "update":
+                if existing_ws is not None:
+                    if dry_run:
+                        logger.info("DRY RUN: would write update corrective for stale workspace %s", ws_id)
                     else:
-                        _write_delete_corrective(event, outbox_log)
-                        stats["corrective_deletes"] += 1
-                        logger.info("Wrote delete corrective for orphaned workspace %s (update + not in DB)", ws_id)
+                        with transaction.atomic():
+                            _write_existing_ws_corrective(existing_ws, "update", outbox_log)
+                    stats["corrective_updates"] += 1
+                else:
+                    if dry_run:
+                        logger.info("DRY RUN: would write delete corrective for orphaned workspace %s", ws_id)
+                    else:
+                        with transaction.atomic():
+                            _write_delete_corrective(event, outbox_log)
+                    stats["corrective_deletes"] += 1
 
         except Exception as e:
             stats["errors"] += 1

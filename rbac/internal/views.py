@@ -2670,10 +2670,15 @@ def recover_workspace_events(request: HttpRequest) -> JsonResponse:
     if isinstance(buffer_minutes, bool) or not isinstance(buffer_minutes, int) or buffer_minutes < 0:
         return JsonResponse({"detail": "buffer_minutes must be a non-negative integer"}, status=400)
 
+    dry_run = body.get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        return JsonResponse({"detail": "dry_run must be a boolean"}, status=400)
+
     try:
         task = recover_workspace_events_in_worker.delay(
             restore_timestamp_iso=restore_timestamp,
             buffer_minutes=buffer_minutes,
+            dry_run=dry_run,
         )
         logger.info(
             "Workspace DR recovery task enqueued: task_id=%s restore_timestamp=%s buffer_minutes=%d",
@@ -2687,6 +2692,7 @@ def recover_workspace_events(request: HttpRequest) -> JsonResponse:
                 "status": "enqueued",
                 "restore_timestamp": restore_timestamp,
                 "buffer_minutes": buffer_minutes,
+                "dry_run": dry_run,
             },
             status=202,
         )
