@@ -4462,27 +4462,28 @@ def guide_user_access_delegation(
         }
 
         # Check if user exists (reuse shared lookup helper)
+        original_input = username
         try:
             _principal, resolved_username, candidates = _lookup_principal(request, username, tenant)
             if candidates:
                 result["user_info"] = {
-                    "error": f"Multiple users match '{username}'. Please specify the exact username.",
+                    "error": f"Multiple users match '{original_input}'. Please specify the exact username.",
                     "candidates": candidates,
+                    "hint": "Re-call with the exact username from the candidates list.",
                 }
             elif resolved_username:
                 username = resolved_username
+                user_info: dict = {"username": username}
+                if resolved_username != original_input:
+                    user_info["resolved_from"] = f"Display name '{original_input}' matched to '{resolved_username}'"
                 # Fetch user details (org admin status, active status) via BOP
                 principals_raw = list_principals(request, usernames=username, match_criteria="exact", limit=1)
                 principals_data = json.loads(principals_raw)
                 if principals_data.get("data"):
                     user_data = principals_data["data"][0]
-                    result["user_info"] = {
-                        "username": username,
-                        "is_org_admin": user_data.get("is_org_admin", False),
-                        "is_active": user_data.get("is_active", True),
-                    }
-                else:
-                    result["user_info"] = {"username": username}
+                    user_info["is_org_admin"] = user_data.get("is_org_admin", False)
+                    user_info["is_active"] = user_data.get("is_active", True)
+                result["user_info"] = user_info
             else:
                 # Fuzzy fallback: try display name search
                 original_input = username
