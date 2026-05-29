@@ -358,14 +358,20 @@ def _call_view_json(
     content = response.content.decode()
     if response.status_code >= 500:
         logger.warning("mcp: _call_view_json got HTTP %d from %s: %s", response.status_code, path, content[:500])
-        return json.dumps({"error": f"HTTP {response.status_code}", "detail": "Internal server error"})
-    if response.status_code >= 400:
+        detail = "Internal server error"
+    elif response.status_code >= 400:
         try:
-            detail = json.loads(content)
-        except (json.JSONDecodeError, ValueError):
+            parsed = json.loads(content)
+            detail = parsed.get("detail", content) if isinstance(parsed, dict) else content
+        except ValueError:
             detail = f"HTTP {response.status_code}"
-        return json.dumps({"error": f"HTTP {response.status_code}", "detail": detail})
-    return content
+        if not isinstance(detail, str):
+            detail = json.dumps(detail)
+        if len(detail) > 512:
+            detail = detail[:512]
+    else:
+        return content
+    return json.dumps({"error": f"HTTP {response.status_code}", "detail": detail})
 
 
 def _call_view_write(
@@ -2877,7 +2883,13 @@ def _check_user_permission_v1(request: HttpRequest, username: str, permission: s
     try:
         raw = _call_view(request, _access_view, path, query_params)
     except Exception as e:
-        logger.warning("mcp: check_user_permission failed for user=%s: %s", username, e)
+        logger.warning(
+            "mcp: check_user_permission failed for user=%s permission=%s application=%s: %s",
+            username,
+            permission,
+            application,
+            e,
+        )
         return json.dumps(
             {
                 "error": "Failed to check permissions",
