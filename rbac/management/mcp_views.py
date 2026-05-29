@@ -409,6 +409,30 @@ def _resolve_group_for_tool(request: HttpRequest, group_uuid: str, group_name: s
     return _resolve_group_uuid(group_uuid, group_name, tenant)
 
 
+_CROSS_ACCOUNT_LIFECYCLE = (
+    "Cross-account request lifecycle: "
+    "create → pending (awaits org admin approval) → approved (active access) → expired. "
+    "A request can also be denied or cancelled at any stage."
+)
+
+
+def _cross_account_status_counts(org_id: str) -> dict[str, int]:
+    """Return pending and expired cross-account request counts in a single query."""
+    rows = (
+        CrossAccountRequest.objects.filter(target_org=org_id, status__in=["pending", "expired"])
+        .values("status")
+        .annotate(count=Count("pk"))
+    )
+    counts = {r["status"]: r["count"] for r in rows}
+    return {"pending": counts.get("pending", 0), "expired": counts.get("expired", 0)}
+
+
+def _format_candidate_name(user: dict) -> str:
+    """Build a display name from BOP user data, falling back to username."""
+    name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+    return name or user.get("username", "")
+
+
 def _lookup_principal(
     request: HttpRequest, username_or_name: str, tenant
 ) -> tuple[Principal | None, str | None, list[dict] | None]:
@@ -444,7 +468,7 @@ def _lookup_principal(
         candidates = [
             {
                 "username": u.get("username"),
-                "name": f"{u.get('first_name', '')} {u.get('last_name', '')}".strip(),
+                "name": _format_candidate_name(u),
             }
             for u in matches
         ]
@@ -1905,8 +1929,9 @@ def investigate_tam_access(
     requests_list = list(queryset)
 
     if not requests_list:
-        pending_count = CrossAccountRequest.objects.filter(target_org=org_id, status="pending").count()
-        expired_count = CrossAccountRequest.objects.filter(target_org=org_id, status="expired").count()
+        status_counts = _cross_account_status_counts(org_id)
+        pending_count = status_counts["pending"]
+        expired_count = status_counts["expired"]
 
         hint: str
         if pending_count or expired_count:
@@ -1927,11 +1952,7 @@ def investigate_tam_access(
                         "pending": pending_count,
                         "expired": expired_count,
                     },
-                    "lifecycle": (
-                        "Cross-account request lifecycle: "
-                        "create → pending (awaits org admin approval) → approved (active access) → expired. "
-                        "A request can also be denied or cancelled at any stage."
-                    ),
+                    "lifecycle": _CROSS_ACCOUNT_LIFECYCLE,
                     "hint": hint,
                 },
             }
@@ -1980,11 +2001,7 @@ def investigate_tam_access(
                     "filtered_count": 0,
                     "message": f"No cross-account requests found matching name='{requester_name}' "
                     f"or email='{requester_email}'.",
-                    "lifecycle": (
-                        "Cross-account request lifecycle: "
-                        "create → pending (awaits org admin approval) → approved (active access) → expired. "
-                        "A request can also be denied or cancelled at any stage."
-                    ),
+                    "lifecycle": _CROSS_ACCOUNT_LIFECYCLE,
                     "hint": "Call investigate_tam_access() without filters to see all active requests, "
                     "or try investigate_tam_access(status='pending') for pending requests.",
                 },
@@ -2144,8 +2161,9 @@ def audit_redhat_access(
     requests_list = list(queryset)
 
     if not requests_list:
-        pending_count = CrossAccountRequest.objects.filter(target_org=org_id, status="pending").count()
-        expired_count = CrossAccountRequest.objects.filter(target_org=org_id, status="expired").count()
+        status_counts = _cross_account_status_counts(org_id)
+        pending_count = status_counts["pending"]
+        expired_count = status_counts["expired"]
 
         ciso_parts = [
             "CISO Summary: Zero Red Hat personnel currently have active access to this "
@@ -4507,7 +4525,7 @@ def guide_user_access_delegation(
                         "candidates": [
                             {
                                 "username": c.get("username"),
-                                "name": f"{c.get('first_name', '')} {c.get('last_name', '')}".strip(),
+                                "name": _format_candidate_name(c),
                             }
                             for c in candidates
                         ],
