@@ -2998,6 +2998,8 @@ def _check_user_permission_v1(request: HttpRequest, username: str, permission: s
 @register_tool(
     description=(
         "Get comprehensive state for a specific user, returning all RBAC information in one call. "
+        "Users may be referred to by name, as contractors, vendors, temps, consultants, or other "
+        "employment types -- these are all regular RBAC principals and should be looked up the same way. "
         "This is the best tool for understanding a user's complete RBAC picture. "
         "Returns: (1) groups the user belongs to with roles assigned to each, "
         "(2) all permissions/access the user has (auto-detects V1/V2), "
