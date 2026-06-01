@@ -29,6 +29,7 @@ from django.db.models.aggregates import Count
 from django.http import Http404
 from django.utils.translation import gettext as _
 from django_filters import rest_framework as filters
+from management.atomic_transactions import atomic_block
 from management.authorization.scope_claims import ScopeClaims
 from management.authorization.token_validator import ITSSOTokenValidator
 from management.filters import CommonFilters
@@ -1315,7 +1316,7 @@ class GroupViewSet(
                 roles = request.data.pop(ROLES_KEY, [])
 
             try:
-                with transaction.atomic():
+                with atomic_block():
                     assert_v1_write_allowed(request.tenant)
                     group = set_system_flag_before_update(group, request.tenant, request.user)
                     add_roles(group, roles, request.tenant, user=request.user)

@@ -153,6 +153,7 @@ def migrate_system_role_bindings_for_group(raw_group: Group, replicator: Relatio
 # This function can operate on V2 tenants, so we need to use a SERIALIZABLE transaction here.
 @atomic_serializable
 def migrate_car_bindings(raw_car: CrossAccountRequest, replicator: RelationReplicator):
+    """Migrate cross-account request bindings to split mixed scope roles."""
     car: Optional[CrossAccountRequest] = CrossAccountRequest.objects.filter(pk=raw_car.pk).select_for_update().first()
 
     if car is None:

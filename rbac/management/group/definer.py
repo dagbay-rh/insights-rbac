@@ -22,12 +22,11 @@ from typing import Optional, Tuple, Union
 from uuid import uuid4
 
 from django.conf import settings
-from django.db import transaction
 from django.db.models.query import QuerySet
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils.translation import gettext as _
-from management.atomic_transactions import atomic
+from management.atomic_transactions import atomic_block
 from management.group.model import Group
 from management.group.platform import GlobalPolicyIdService
 from management.group.relation_api_dual_write_group_handler import (
@@ -54,8 +53,8 @@ logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 def seed_group() -> Tuple[Group, Group]:
     """Create or update default group."""
     try:
-        public_tenant = Tenant.objects.get(tenant_name="public")
-        with transaction.atomic():
+        with atomic_block():
+            public_tenant = Tenant.objects.get(tenant_name="public")
             # 'Default access' group
             name = "Default access"
             group_description = (
@@ -157,14 +156,12 @@ def clone_default_group_in_public_schema(group, tenant) -> Optional[Group]:
     return group
 
 
-@atomic
 def add_roles(group, roles_or_role_ids, tenant, user=None):
     """Process list of roles and add them to the group.
 
-    This function uses SERIALIZABLE transaction isolation when adding system roles
-    to prevent race conditions during scope migrations. This ensures that the role's
-    scope determination (based on its permissions) and the subsequent binding creation
-    see a consistent view of the database, even if role seeding is happening concurrently.
+    Note: This function should be called within a SERIALIZABLE transaction when adding
+    system roles to prevent race conditions during scope migrations. The caller is
+    responsible for ensuring the appropriate transaction isolation level.
     """
     roles = _roles_by_query_or_ids(roles_or_role_ids, tenant)
     group_name = group.name
