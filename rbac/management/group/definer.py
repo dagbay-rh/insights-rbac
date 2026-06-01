@@ -27,6 +27,7 @@ from django.db.models.query import QuerySet
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils.translation import gettext as _
+from management.atomic_transactions import atomic
 from management.group.model import Group
 from management.group.platform import GlobalPolicyIdService
 from management.group.relation_api_dual_write_group_handler import (
@@ -156,8 +157,15 @@ def clone_default_group_in_public_schema(group, tenant) -> Optional[Group]:
     return group
 
 
+@atomic
 def add_roles(group, roles_or_role_ids, tenant, user=None):
-    """Process list of roles and add them to the group."""
+    """Process list of roles and add them to the group.
+
+    This function uses SERIALIZABLE transaction isolation when adding system roles
+    to prevent race conditions during scope migrations. This ensures that the role's
+    scope determination (based on its permissions) and the subsequent binding creation
+    see a consistent view of the database, even if role seeding is happening concurrently.
+    """
     roles = _roles_by_query_or_ids(roles_or_role_ids, tenant)
     group_name = group.name
     group, created = Group.objects.get_or_create(name=group_name, tenant=tenant)
