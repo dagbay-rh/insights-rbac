@@ -3228,6 +3228,36 @@ def get_user_state(
     return json.dumps(result, default=str)
 
 
+@register_tool(
+    description=(
+        "Look up a contractor, vendor, consultant, temp, intern, or any non-employee by name. "
+        "Returns their full RBAC state: group memberships, roles, permissions, and audit trail. "
+        "Use for offboarding, compliance reviews, access audits, or deprovisioning. "
+        "This is the same as get_user_state -- all employment types are regular RBAC users."
+    ),
+    requires_auth=True,
+    api_version=ApiVersion.UNIFIED,
+    required_relation="rbac_roles_read",
+    v1_permission=("principal", "read"),
+)
+def lookup_person(
+    request: HttpRequest,
+    *,
+    username: str,
+    include_group_roles: bool = True,
+    include_permissions: bool = True,
+    audit_log_limit: int = 10,
+) -> str:
+    """Alias for get_user_state that surfaces contractor/vendor/consultant terminology."""
+    return get_user_state(
+        request,
+        username=username,
+        include_group_roles=include_group_roles,
+        include_permissions=include_permissions,
+        audit_log_limit=audit_log_limit,
+    )
+
+
 def _get_user_access_v1(request: HttpRequest, username: str) -> list[dict[str, Any]]:
     """Get user's access permissions using V1 API.
 
