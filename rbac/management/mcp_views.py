@@ -2995,6 +2995,11 @@ def _check_user_permission_v1(request: HttpRequest, username: str, permission: s
     )
 
 
+_DEFAULT_INCLUDE_GROUP_ROLES = True
+_DEFAULT_INCLUDE_PERMISSIONS = True
+_DEFAULT_AUDIT_LOG_LIMIT = 10
+
+
 @register_tool(
     description=(
         "Get comprehensive state for a specific user, returning all RBAC information in one call. "
@@ -3037,9 +3042,9 @@ def get_user_state(
     request: HttpRequest,
     *,
     username: str,
-    include_group_roles: bool = True,
-    include_permissions: bool = True,
-    audit_log_limit: int = 10,
+    include_group_roles: bool = _DEFAULT_INCLUDE_GROUP_ROLES,
+    include_permissions: bool = _DEFAULT_INCLUDE_PERMISSIONS,
+    audit_log_limit: int = _DEFAULT_AUDIT_LOG_LIMIT,
 ) -> str:
     """Get comprehensive RBAC state for a user including groups, access, and audit activity."""
     # Clamp audit_log_limit to prevent expensive queries
@@ -3226,6 +3231,36 @@ def get_user_state(
     }
 
     return json.dumps(result, default=str)
+
+
+@register_tool(
+    description=(
+        "Look up a contractor, vendor, consultant, temp, intern, or any non-employee by name. "
+        "Returns their full RBAC state: group memberships, roles, permissions, and audit trail. "
+        "Use for offboarding, compliance reviews, access audits, or deprovisioning. "
+        "This is the same as get_user_state -- all employment types are regular RBAC users."
+    ),
+    requires_auth=True,
+    api_version=ApiVersion.UNIFIED,
+    required_relation="rbac_roles_read",
+    v1_permission=("principal", "read"),
+)
+def lookup_person(
+    request: HttpRequest,
+    *,
+    username: str,
+    include_group_roles: bool = _DEFAULT_INCLUDE_GROUP_ROLES,
+    include_permissions: bool = _DEFAULT_INCLUDE_PERMISSIONS,
+    audit_log_limit: int = _DEFAULT_AUDIT_LOG_LIMIT,
+) -> str:
+    """Alias for get_user_state that surfaces contractor/vendor/consultant terminology."""
+    return get_user_state(
+        request,
+        username=username,
+        include_group_roles=include_group_roles,
+        include_permissions=include_permissions,
+        audit_log_limit=audit_log_limit,
+    )
 
 
 def _get_user_access_v1(request: HttpRequest, username: str) -> list[dict[str, Any]]:
