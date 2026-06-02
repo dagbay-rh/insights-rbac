@@ -3164,6 +3164,109 @@ class MCPGetUserStateTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("AFTER ANALYSIS", description)
 
 
+class MCPLookupPersonTests(MCPToolTestMixin, IdentityRequest):
+    """Tests for the lookup_person MCP tool (forwarding alias for get_user_state)."""
+
+    def setUp(self):
+        """Set up lookup_person tests."""
+        super().setUp()
+        self.url = "/_private/_a2s/mcp/"
+        self.client = APIClient()
+        self.test_username = self.user_data["username"]
+        self.principal = Principal.objects.create(username=self.test_username, tenant=self.tenant)
+
+        self.group = Group.objects.create(
+            name="Contractor Team", description="External contractors", tenant=self.tenant
+        )
+        self.group.principals.add(self.principal)
+
+        self.role = Role.objects.create(name="Viewer", display_name="Viewer", tenant=self.tenant)
+        self.permission = Permission.objects.create(
+            application="inventory",
+            resource_type="hosts",
+            verb="read",
+            permission="inventory:hosts:read",
+            tenant=self.tenant,
+        )
+        self.access = Access.objects.create(permission=self.permission, role=self.role, tenant=self.tenant)
+
+        self.policy = Policy.objects.create(name="contractor_policy", group=self.group, tenant=self.tenant)
+        self.policy.roles.add(self.role)
+
+    def tearDown(self):
+        """Tear down lookup_person tests."""
+        Policy.objects.all().delete()
+        Access.objects.all().delete()
+        Role.objects.all().delete()
+        Permission.objects.all().delete()
+        Group.objects.all().delete()
+        Principal.objects.all().delete()
+        super().tearDown()
+
+    def test_lookup_person_registered_in_tools_list(self):
+        """Positive: lookup_person appears in the MCP tools/list response."""
+        tool_names = self._get_tool_names()
+        self.assertIn("lookup_person", tool_names)
+
+    def test_lookup_person_description_contains_contractor_keywords(self):
+        """Positive: lookup_person description contains contractor/offboarding keywords."""
+        body = {"jsonrpc": "2.0", "method": "tools/list", "id": 2, "params": {}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+        tools = response.json()["result"]["tools"]
+        tool = next(t for t in tools if t["name"] == "lookup_person")
+        description = tool["description"]
+
+        self.assertIn("contractor", description)
+        self.assertIn("vendor", description)
+        self.assertIn("consultant", description)
+        self.assertIn("offboarding", description)
+
+    def test_lookup_person_returns_same_data_as_get_user_state(self):
+        """Positive: lookup_person returns identical output to get_user_state."""
+        response_person = self._call_tool("lookup_person", {"username": self.test_username})
+        response_state = self._call_tool("get_user_state", {"username": self.test_username})
+
+        output_person = self._get_tool_output(response_person)
+        output_state = self._get_tool_output(response_state)
+
+        self.assertEqual(output_person["username"], output_state["username"])
+        self.assertEqual(output_person["org_version"], output_state["org_version"])
+        self.assertEqual(output_person["summary"]["group_count"], output_state["summary"]["group_count"])
+        self.assertEqual(output_person["summary"]["permission_count"], output_state["summary"]["permission_count"])
+
+    def test_lookup_person_success(self):
+        """Positive: lookup_person returns comprehensive user state."""
+        response = self._call_tool("lookup_person", {"username": self.test_username})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+
+        self.assertEqual(tool_output["username"], self.test_username)
+        self.assertIn("groups", tool_output)
+        self.assertIn("access", tool_output)
+        self.assertIn("summary", tool_output)
+
+        self.assertEqual(tool_output["summary"]["group_count"], 1)
+        self.assertEqual(tool_output["groups"][0]["name"], "Contractor Team")
+
+    def test_lookup_person_user_not_found(self):
+        """Negative: lookup_person returns error for non-existent user."""
+        response = self._call_tool("lookup_person", {"username": "nonexistent_contractor"})
+
+        tool_output = self._get_tool_output(response)
+        self.assertIn("error", tool_output)
+        self.assertIn("not found", tool_output["error"])
+
+    def test_lookup_person_without_auth_returns_error(self):
+        """Permission: lookup_person without auth returns auth error."""
+        response = self._call_tool("lookup_person", {"username": self.test_username}, use_auth=False)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.json()
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32000)
+
+
 @override_settings(BYPASS_BOP_VERIFICATION=True, V2_APIS_ENABLED=True)
 class MCPGetUserStateV2Tests(MCPToolTestMixin, IdentityRequest):
     """Tests for get_user_state on V2 organizations."""
