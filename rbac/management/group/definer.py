@@ -51,9 +51,9 @@ logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
 
 def _seed_group_impl(public_tenant):
-    """Implementation of seed_group that does the actual work.
+    """Create or update default and admin default groups.
 
-    Separated to allow calling from both within and outside transactions.
+    Separated from seed_group to allow calling from both within and outside transactions.
     """
     # 'Default access' group
     name = "Default access"
