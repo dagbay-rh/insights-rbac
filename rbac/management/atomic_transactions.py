@@ -63,8 +63,19 @@ def atomic_with_retry(retries: int):
 
 
 def atomic_block():
-    """Return a context manager that can be used to turn a block into a SERIALIZABLE transaction."""
+    """Return a context manager that can be used to turn a block into a SERIALIZABLE transaction.
+
+    If we're already in a transaction (e.g., from a test or nested call), this will use a regular
+    savepoint instead of trying to set isolation level, which would fail.
+    """
+    from django.db import connection
+
     if is_atomic_disabled():
+        return transaction.atomic()
+
+    # If we're already in a transaction, don't try to set isolation level
+    # as it will fail with "SET TRANSACTION ISOLATION LEVEL must be called before any query"
+    if connection.in_atomic_block:
         return transaction.atomic()
 
     return pgtransaction.atomic(isolation_level=ISOLATION_LEVEL)
