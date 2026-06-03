@@ -5522,7 +5522,10 @@ def _validate_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> str |
 
     Returns None on success, or a sanitized error message on failure.
     """
-    schemas = _get_tool_schemas()
+    try:
+        schemas = _get_tool_schemas()
+    except Exception:
+        return None
     schema = schemas.get(tool_name)
     if schema is None:
         return None
