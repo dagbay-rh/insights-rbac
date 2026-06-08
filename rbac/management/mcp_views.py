@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache, wraps
 from typing import Any, Callable
 
+import jsonschema
 from django.conf import settings
 from django.core.cache import cache as django_cache
 from django.db.models import Count, Prefetch
@@ -409,6 +410,74 @@ def _resolve_group_for_tool(request: HttpRequest, group_uuid: str, group_name: s
     return _resolve_group_uuid(group_uuid, group_name, tenant)
 
 
+_CROSS_ACCOUNT_LIFECYCLE = (
+    "Cross-account request lifecycle: "
+    "create → pending (awaits org admin approval) → approved (active access) → expired. "
+    "A request can also be denied or cancelled at any stage."
+)
+
+
+def _cross_account_status_counts(org_id: str) -> dict[str, int]:
+    """Return pending and expired cross-account request counts in a single query."""
+    rows = (
+        CrossAccountRequest.objects.filter(target_org=org_id, status__in=["pending", "expired"])
+        .values("status")
+        .annotate(count=Count("pk"))
+    )
+    counts = {r["status"]: r["count"] for r in rows}
+    return {"pending": counts.get("pending", 0), "expired": counts.get("expired", 0)}
+
+
+def _format_candidate_name(user: dict) -> str:
+    """Build a display name from BOP user data, falling back to username."""
+    name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+    return name or user.get("username", "")
+
+
+def _lookup_principal(
+    request: HttpRequest, username_or_name: str, tenant
+) -> tuple[Principal | None, str | None, list[dict] | None]:
+    """Resolve a principal by username or display name.
+
+    Returns (principal, resolved_username, candidates).
+    - On exact or unique match: principal and resolved_username are set, candidates is None.
+    - On multiple matches: principal/resolved_username are None, candidates is a list of user dicts.
+    - On no matches: everything is None.
+    """
+    principal = Principal.objects.filter(username=username_or_name, tenant=tenant).first()
+    if principal:
+        return principal, username_or_name, None
+
+    # Username not found -- try display name search via BOP
+    result_json = _list_principals_by_name(
+        request, username_or_name, limit=5, offset=0, sort_order="asc", status="enabled"
+    )
+    try:
+        result = json.loads(result_json)
+        matches = result.get("data", [])
+    except (json.JSONDecodeError, AttributeError):
+        matches = []
+
+    if len(matches) == 1:
+        resolved_username = matches[0].get("username")
+        if resolved_username:
+            principal = Principal.objects.filter(username=resolved_username, tenant=tenant).first()
+            if principal:
+                return principal, resolved_username, None
+
+    if len(matches) > 1:
+        candidates = [
+            {
+                "username": u.get("username"),
+                "name": _format_candidate_name(u),
+            }
+            for u in matches
+        ]
+        return None, None, candidates
+
+    return None, None, None
+
+
 # --- Tool implementations ---
 
 
@@ -677,6 +746,72 @@ def get_status(request: HttpRequest) -> str:
     """Return server status by delegating to the status view."""
     path = reverse("v1_api:server-status")
     return _call_view(request, _status_view, path, {})
+
+
+@register_tool(
+    description=(
+        "Check MCP server health: tool registry integrity, database connectivity, "
+        "and Redis availability. No authentication required — designed for "
+        "infrastructure probing and readiness checks. "
+        "Returns status 'ok' when all checks pass, 'degraded' with per-check "
+        "details when any check fails."
+    ),
+    requires_auth=False,
+    api_version=ApiVersion.UNVERSIONED,
+)
+def health_check() -> str:
+    """Verify MCP-specific health: tool registry, database, and Redis."""
+    checks: dict[str, str] = {}
+    details: dict[str, str] = {}
+
+    # 1. Tool registry check
+    try:
+        config_count = len(_TOOL_CONFIG)
+        tools = _get_tools()
+        tools_count = len(tools)
+        if config_count > 0 and tools_count > 0:
+            checks["tools"] = "ok"
+        else:
+            checks["tools"] = "error"
+            details["tools"] = "registry empty"
+    except Exception:
+        logger.exception("mcp: health_check tools registry probe failed")
+        checks["tools"] = "error"
+        details["tools"] = "unavailable"
+
+    # 2. Database check
+    try:
+        _check_database()
+        checks["database"] = "ok"
+    except Exception:
+        logger.exception("mcp: health_check database probe failed")
+        checks["database"] = "error"
+        details["database"] = "unavailable"
+
+    # 3. Redis check
+    try:
+        _check_redis()
+        checks["redis"] = "ok"
+    except Exception:
+        logger.exception("mcp: health_check redis probe failed")
+        checks["redis"] = "error"
+        details["redis"] = "unavailable"
+
+    overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
+    result: dict[str, Any] = {"status": overall, "checks": checks}
+    if details:
+        result["details"] = details
+    return json.dumps(result)
+
+
+def _check_database() -> None:
+    """Probe database connectivity via a lightweight ORM query."""
+    Tenant.objects.exists()
+
+
+def _check_redis() -> None:
+    """Probe Redis connectivity via PING."""
+    _get_redis().ping()
 
 
 @register_tool(
@@ -1159,14 +1294,17 @@ def list_role_access(
         "To find which roles grant a specific permission, call "
         "search_roles(permission='<app>:<resource>:<verb>'). Accepts comma-separated permissions. "
         "To see all roles for an application, call search_roles(application='<app>'). "
+        "To find roles held by a specific user (V1 orgs only), call search_roles(username='<user>'). "
         "V2 orgs support name with '*' wildcards (e.g., name='Cost*') and resource_type filter. "
-        "V1 orgs additionally support display_name, system flag filters. "
+        "V1 orgs additionally support display_name, system flag, and username filters. "
         "Returns: {meta: {count}, links, data: [{uuid, name, description, ...}], org_version: 'v1'|'v2'}.\n"
         "Caveats:\n"
         "- The permission filter finds roles containing that permission, but does not account for "
         "ResourceDefinition filters that may narrow the permission's effective scope.\n"
         "- Role names are not unique across V1 and V2. The org_version field indicates which API "
-        "version the result came from."
+        "version the result came from.\n"
+        "- The username filter is V1-only. For V2 orgs, it is ignored and returned in ignored_filters "
+        "with guidance to use list_role_bindings instead."
     ),
     requires_auth=True,
     api_version=ApiVersion.UNIFIED,
@@ -1185,12 +1323,27 @@ def search_roles(
     system: str = "",
     resource_type: str = "",
     order_by: str = "",
+    username: str = "",
 ) -> str:
     """Search roles, auto-detecting V1/V2 and delegating to the appropriate view."""
     tenant = getattr(request, "tenant", None)
     if tenant and is_v2_write_activated(tenant):
-        return _search_roles_v2(request, limit, offset, name, resource_type, permission, order_by)
-    return _search_roles_v1(request, limit, offset, name, display_name, permission, application, system, order_by)
+        return _search_roles_v2(
+            request,
+            limit,
+            offset,
+            name,
+            resource_type,
+            permission,
+            order_by,
+            username,
+            display_name,
+            application,
+            system,
+        )
+    return _search_roles_v1(
+        request, limit, offset, name, display_name, permission, application, system, order_by, username
+    )
 
 
 def _search_roles_v1(
@@ -1203,6 +1356,7 @@ def _search_roles_v1(
     application: str,
     system: str,
     order_by: str,
+    username: str,
 ) -> str:
     """Search roles using V1 API."""
     query_params: dict[str, str] = {
@@ -1221,6 +1375,8 @@ def _search_roles_v1(
         query_params["system"] = system
     if order_by:
         query_params["order_by"] = order_by
+    if username:
+        query_params["username"] = username
 
     path = reverse("v1_management:role-list")
     raw = _call_view(request, _role_v1_list_view, path, query_params)
@@ -1237,6 +1393,10 @@ def _search_roles_v2(
     resource_type: str,
     permission: str,
     order_by: str,
+    username: str,
+    display_name: str,
+    application: str,
+    system: str,
 ) -> str:
     """Search roles using V2 API."""
     query_params: dict[str, str] = {
@@ -1256,6 +1416,46 @@ def _search_roles_v2(
     raw = _call_view(request, _role_v2_list_view, path, query_params)
     result = json.loads(raw)
     result["org_version"] = "v2"
+
+    ignored_filters: dict[str, dict[str, str]] = {}
+
+    if username:
+        ignored_filters["username"] = {
+            "value": username,
+            "reason": "V2 orgs use role bindings instead of group-based role assignment.",
+            "alternative": (
+                "Use list_role_bindings(granted_subject_type='principal', "
+                f"granted_subject_principal_user_id='{username}') to find roles bound to this user."
+            ),
+        }
+
+    if display_name:
+        ignored_filters["display_name"] = {
+            "value": display_name,
+            "reason": "V2 roles do not have a separate display_name field.",
+            "alternative": "Use the 'name' parameter instead, which supports wildcard matching (e.g., name='Cost*').",
+        }
+
+    if application:
+        ignored_filters["application"] = {
+            "value": application,
+            "reason": "V2 roles do not support filtering by application.",
+            "alternative": (
+                "Use the 'permission' parameter to filter by specific permissions "
+                "(e.g., permission='cost-management:*:*')."
+            ),
+        }
+
+    if system:
+        ignored_filters["system"] = {
+            "value": system,
+            "reason": "V2 roles use 'type' (custom/system/seeded) instead of a boolean 'system' flag.",
+            "alternative": "V2 role results include a 'type' field you can filter client-side.",
+        }
+
+    if ignored_filters:
+        result["ignored_filters"] = ignored_filters
+
     return json.dumps(result)
 
 
@@ -1675,7 +1875,7 @@ def list_group_principals(
         "list_cross_account_requests(query_by='target_org', status='approved'). "
         "Order by: 'request_id', 'start_date', 'end_date', 'created', 'modified', "
         "'status' (prefix with '-' to reverse). "
-        "Returns: {meta: {count}, links, data: [{request_id, target_account, status, start_date, end_date, ...}]}. "
+        "Returns: {meta: {count}, links, data: [{request_id, target_org, status, start_date, end_date, ...}]}. "
         "Calls: GET /api/v1/cross-account-requests/\n"
         "Caveats:\n"
         "- Cross-account requests are org-to-org, not user-to-user. A TAM requests access to your "
@@ -1721,8 +1921,8 @@ def list_cross_account_requests(
 @register_tool(
     description=(
         "Get details of a specific cross-account access request by its ID, including "
-        "status, start/end dates, target account, and the requested roles. "
-        "Returns: {request_id, target_account, status, start_date, end_date, created, roles, ...}. "
+        "status, start/end dates, target org, and the requested roles. "
+        "Returns: {request_id, target_org, status, start_date, end_date, created, roles, ...}. "
         "Calls: GET /api/v1/cross-account-requests/{request_id}/"
     ),
     requires_auth=True,
@@ -1747,6 +1947,11 @@ def get_cross_account_request(
         "investigate_tam_access(requester_name='Rachel') to see what roles/permissions she has. "
         "Set 'required_permission' to check if a specific permission is granted (e.g., "
         "'subscriptions:watch:read'). The tool will report whether that permission is present. "
+        "When no approved requests are found, the tool proactively checks for pending/expired "
+        "requests and explains the cross-account request lifecycle. "
+        "RESPONSE FORMAT: Present results as a table: "
+        "requester name | roles granted | specific permissions | expiration | status. "
+        "Explain the lifecycle: create → pending → approved → active → expired. "
         "Returns: {requests: [{request_id, status, end_date, days_remaining, requester_info, "
         "roles: [{name, permissions: [...]}], permission_summary}], analysis}. "
         "AFTER ANALYSIS: Present numbered options: "
@@ -1791,14 +1996,31 @@ def investigate_tam_access(
     requests_list = list(queryset)
 
     if not requests_list:
+        status_counts = _cross_account_status_counts(org_id)
+        pending_count = status_counts["pending"]
+        expired_count = status_counts["expired"]
+
+        hint: str
+        if pending_count or expired_count:
+            hint = (
+                f"There are {pending_count} pending and {expired_count} expired request(s). "
+                "Use investigate_tam_access(status='pending') or status='expired' to inspect them."
+            )
+        else:
+            hint = "No requests of any status exist for this organization."
+
         return json.dumps(
             {
                 "requests": [],
                 "analysis": {
                     "total_active_requests": 0,
                     "message": f"No {status} cross-account requests found for this organization.",
-                    "hint": "Use list_cross_account_requests(query_by='target_org', status='pending') "
-                    "to check for pending requests, or status='expired' for expired ones.",
+                    "other_statuses": {
+                        "pending": pending_count,
+                        "expired": expired_count,
+                    },
+                    "lifecycle": _CROSS_ACCOUNT_LIFECYCLE,
+                    "hint": hint,
                 },
             }
         )
@@ -1846,7 +2068,9 @@ def investigate_tam_access(
                     "filtered_count": 0,
                     "message": f"No cross-account requests found matching name='{requester_name}' "
                     f"or email='{requester_email}'.",
-                    "hint": "Call investigate_tam_access() without filters to see all active requests.",
+                    "lifecycle": _CROSS_ACCOUNT_LIFECYCLE,
+                    "hint": "Call investigate_tam_access() without filters to see all active requests, "
+                    "or try investigate_tam_access(status='pending') for pending requests.",
                 },
             }
         )
@@ -1956,6 +2180,10 @@ def investigate_tam_access(
         "a summary of all active approved cross-account requests with audit activity. "
         "Set include_inactive=true to also see expired or pending requests. "
         "Set audit_days to control how far back to look in audit logs (default 30 days). "
+        "FORMAT FOR CISO BRIEFING: Present as a table with columns: "
+        "Red Hat user | roles | access scope | expiration | approved by | recent activity. "
+        "When no active access exists, still present a summary stating zero access, "
+        "note any pending/expired requests, and provide a monitoring recommendation. "
         "Returns: {active_access: [{user_info, roles, permissions, expires, days_remaining, "
         "audit_activity: {total_actions, recent_actions, summary}}], summary: {total_users, "
         "expiring_soon, unused_access}}. "
@@ -2000,6 +2228,19 @@ def audit_redhat_access(
     requests_list = list(queryset)
 
     if not requests_list:
+        status_counts = _cross_account_status_counts(org_id)
+        pending_count = status_counts["pending"]
+        expired_count = status_counts["expired"]
+
+        ciso_parts = [
+            "CISO Summary: Zero Red Hat personnel currently have active access to this "
+            "organization's console.redhat.com environment."
+        ]
+        if pending_count:
+            ciso_parts.append(f"There are {pending_count} pending request(s) awaiting approval.")
+        if expired_count:
+            ciso_parts.append(f"There are {expired_count} previously expired access grant(s) on record.")
+
         return json.dumps(
             {
                 "active_access": [],
@@ -2007,8 +2248,20 @@ def audit_redhat_access(
                     "total_users": 0,
                     "expiring_soon": 0,
                     "unused_access": 0,
-                    "message": "No cross-account requests found for this organization.",
-                    "hint": "Use list_cross_account_requests(query_by='target_org') to see all requests.",
+                    "pending_requests": pending_count,
+                    "expired_requests": expired_count,
+                    "message": "No active Red Hat cross-account access found for this organization.",
+                    "ciso_briefing": " ".join(ciso_parts),
+                    "briefing_template": (
+                        "If active access existed, the report would include for each Red Hat user: "
+                        "name, email, roles granted, permission scope, access start/end dates, "
+                        "days remaining, and RBAC audit activity (actions performed during the access window)."
+                    ),
+                    "monitoring": (
+                        "To monitor future cross-account requests, periodically call "
+                        "audit_redhat_access() or list_cross_account_requests(query_by='target_org', "
+                        "status='pending') to catch new requests before they are approved."
+                    ),
                 },
             }
         )
@@ -2632,19 +2885,56 @@ def check_user_permission(
 
     tenant = getattr(request, "tenant", None)
     if not tenant or not is_v2_write_activated(tenant):
+        # V1 path: resolve display name then delegate
+        if tenant:
+            _principal, resolved_username, candidates = _lookup_principal(request, username, tenant)
+            if candidates:
+                return json.dumps(
+                    {
+                        "error": f"Multiple users match '{username}'. Please specify the exact username.",
+                        "candidates": candidates,
+                    }
+                )
+            if resolved_username:
+                username = resolved_username
+            else:
+                return json.dumps(
+                    {
+                        "allowed": False,
+                        "username": username,
+                        "permission": permission,
+                        "hint": f"User '{username}' not found in this organization. "
+                        "Use list_principals(usernames='<partial>', match_criteria='partial') to search.",
+                    }
+                )
         return _check_user_permission_v1(request, username, permission)
 
-    principal = Principal.objects.filter(username=username, tenant=tenant).first()
-    if not principal:
+    # V2 path: resolve display name → principal
+    resolved_principal, resolved_username, candidates = _lookup_principal(request, username, tenant)
+    if candidates:
         return json.dumps(
             {
                 "allowed": False,
                 "username": username,
                 "permission": permission,
                 "org_version": "v2",
-                "hint": f"User '{username}' not found in this organization.",
+                "error": f"Multiple users match '{username}'. Please specify the exact username.",
+                "candidates": candidates,
             }
         )
+    if not resolved_principal or not resolved_username:
+        return json.dumps(
+            {
+                "allowed": False,
+                "username": username,
+                "permission": permission,
+                "org_version": "v2",
+                "hint": f"User '{username}' not found in this organization. "
+                "Use list_principals(usernames='<partial>', match_criteria='partial') to search.",
+            }
+        )
+    principal: Principal = resolved_principal
+    username = resolved_username
 
     bindings_path = reverse("v2_management:role-bindings-list")
     raw = _call_view(
@@ -2771,9 +3061,16 @@ def _check_user_permission_v1(request: HttpRequest, username: str, permission: s
     )
 
 
+_DEFAULT_INCLUDE_GROUP_ROLES = True
+_DEFAULT_INCLUDE_PERMISSIONS = True
+_DEFAULT_AUDIT_LOG_LIMIT = 10
+
+
 @register_tool(
     description=(
         "Get comprehensive state for a specific user, returning all RBAC information in one call. "
+        "Users may be referred to by name, as contractors, vendors, temps, consultants, or other "
+        "employment types -- these are all regular RBAC principals and should be looked up the same way. "
         "This is the best tool for understanding a user's complete RBAC picture. "
         "Returns: (1) groups the user belongs to with roles assigned to each, "
         "(2) all permissions/access the user has (auto-detects V1/V2), "
@@ -2781,8 +3078,18 @@ def _check_user_permission_v1(request: HttpRequest, username: str, permission: s
         "(4) actions performed BY the user with breakdown by group and action type. "
         "Supports both V1 and V2 organizations automatically. "
         "Use this instead of calling list_groups + list_access + list_audit_logs separately. "
+        "SCENARIO: 'Contractor X is being offboarded, I need their RBAC activity and current access' → "
+        "call get_user_state(username='X') to get groups, permissions, and audit trail in one call. "
+        "USE WHEN: 'offboard', 'offboarding', 'leaving the company', 'contractor leaving', "
+        "'deprovisioning', 'compliance report', 'activity summary for records', 'what access does user have'. "
         "RESPONSE FORMAT: Summarize as 'Member of: <groups>. Effective access: <role names>. "
         "Audit log: <N> actions performed by user on <groups> (action types).'. "
+        "AFTER ANALYSIS: Present numbered options: "
+        "(1) remove the user from all their group(s), "
+        "(2) generate a formatted compliance report for records, "
+        "(3) both. "
+        "Format as 'Reply 1, 2, or 3 -- or no'. "
+        "Note: Deactivating the user account itself is handled in the IT/account portal, not the RBAC API. "
         "Returns: {username, org_version, groups: [{name, roles, recent_activity}], "
         "access: [{permission, role_name, ...}], user_actions: {total_count, by_group, by_type, recent}, "
         "summary: {group_count, permission_count, actions_by_user, recent_actions_on_groups}}.\n"
@@ -2801,9 +3108,9 @@ def get_user_state(
     request: HttpRequest,
     *,
     username: str,
-    include_group_roles: bool = True,
-    include_permissions: bool = True,
-    audit_log_limit: int = 10,
+    include_group_roles: bool = _DEFAULT_INCLUDE_GROUP_ROLES,
+    include_permissions: bool = _DEFAULT_INCLUDE_PERMISSIONS,
+    audit_log_limit: int = _DEFAULT_AUDIT_LOG_LIMIT,
 ) -> str:
     """Get comprehensive RBAC state for a user including groups, access, and audit activity."""
     # Clamp audit_log_limit to prevent expensive queries
@@ -2817,16 +3124,24 @@ def get_user_state(
     is_v2 = tenant and is_v2_write_activated(tenant)
     org_version = "v2" if is_v2 else "v1"
 
-    # Check if user exists
-    principal = Principal.objects.filter(username=username, tenant=tenant).first()
-    if not principal:
+    # Resolve username or display name
+    resolved_principal, resolved_username, candidates = _lookup_principal(request, username, tenant)
+    if candidates:
+        return json.dumps(
+            {
+                "error": f"Multiple users match '{username}'. Please specify the exact username.",
+                "candidates": candidates,
+            }
+        )
+    if not resolved_principal or not resolved_username:
         return json.dumps(
             {
                 "error": f"User '{username}' not found in this organization",
-                "org_version": org_version,
-                "hint": "Use list_principals(usernames='<user>', match_criteria='exact') to verify the user exists.",
+                "hint": "Use list_principals(usernames='<partial>', match_criteria='partial') to search.",
             }
         )
+    principal: Principal = resolved_principal
+    username = resolved_username
 
     result: dict[str, Any] = {
         "username": username,
@@ -2982,6 +3297,36 @@ def get_user_state(
     }
 
     return json.dumps(result, default=str)
+
+
+@register_tool(
+    description=(
+        "Look up a contractor, vendor, consultant, temp, intern, or any non-employee by name. "
+        "Returns their full RBAC state: group memberships, roles, permissions, and audit trail. "
+        "Use for offboarding, compliance reviews, access audits, or deprovisioning. "
+        "This is the same as get_user_state -- all employment types are regular RBAC users."
+    ),
+    requires_auth=True,
+    api_version=ApiVersion.UNIFIED,
+    required_relation="rbac_roles_read",
+    v1_permission=("principal", "read"),
+)
+def lookup_person(
+    request: HttpRequest,
+    *,
+    username: str,
+    include_group_roles: bool = _DEFAULT_INCLUDE_GROUP_ROLES,
+    include_permissions: bool = _DEFAULT_INCLUDE_PERMISSIONS,
+    audit_log_limit: int = _DEFAULT_AUDIT_LOG_LIMIT,
+) -> str:
+    """Alias for get_user_state that surfaces contractor/vendor/consultant terminology."""
+    return get_user_state(
+        request,
+        username=username,
+        include_group_roles=include_group_roles,
+        include_permissions=include_permissions,
+        audit_log_limit=audit_log_limit,
+    )
 
 
 def _get_user_access_v1(request: HttpRequest, username: str) -> list[dict[str, Any]]:
@@ -3469,17 +3814,25 @@ def investigate_user_access(
     is_v2 = is_v2_write_activated(tenant)
     org_version = "v2" if is_v2 else "v1"
 
-    # Step 1: Check if user exists and get org admin status
-    principal = Principal.objects.filter(username=username, tenant=tenant).first()
-    is_org_admin = False
-
-    if not principal:
+    # Step 1: Resolve username or display name and get org admin status
+    resolved_principal, resolved_username, candidates = _lookup_principal(request, username, tenant)
+    if candidates:
+        return json.dumps(
+            {
+                "error": f"Multiple users match '{username}'. Please specify the exact username.",
+                "candidates": candidates,
+            }
+        )
+    if not resolved_principal or not resolved_username:
         return json.dumps(
             {
                 "error": f"User '{username}' not found in this organization",
-                "hint": "Use list_principals(usernames='<partial>', match_criteria='partial') to search for the user.",
+                "hint": "Use list_principals(usernames='<partial>', match_criteria='partial') to search.",
             }
         )
+    principal: Principal = resolved_principal
+    username = resolved_username
+    is_org_admin = False
 
     # Check org admin status via BOP
     if org_id:
@@ -4151,9 +4504,9 @@ def create_workspace(
     description=(
         "Create a cross-account access request. Allows users from one org (e.g. TAMs) "
         "to request temporary access to another org's resources. "
-        "Required: target_account (the account number to request access to), "
+        "Required: target_org (the org ID to request access to), "
         "start_date (YYYY-MM-DD), end_date (YYYY-MM-DD), roles (list of role UUIDs). "
-        "Example: create_cross_account_request(target_account='12345', "
+        "Example: create_cross_account_request(target_org='12345', "
         "start_date='2026-06-01', end_date='2026-06-30', roles=['<role-uuid>']) "
         "Returns: the created request with request_id, status, dates. "
         "Calls: POST /api/v1/cross-account-requests/"
@@ -4164,14 +4517,14 @@ def create_workspace(
 def create_cross_account_request(
     request: HttpRequest,
     *,
-    target_account: str,
+    target_org: str,
     start_date: str,
     end_date: str,
     roles: list[str],
 ) -> str:
     """Create a cross-account request by delegating to CrossAccountRequestViewSet."""
     body: dict[str, Any] = {
-        "target_account": target_account,
+        "target_org": target_org,
         "start_date": start_date,
         "end_date": end_date,
         "roles": roles,
@@ -4184,7 +4537,9 @@ def create_cross_account_request(
 @register_tool(
     description=(
         "Check if a user can be delegated user access management without Org Admin privileges. "
-        "\n\n"
+        "Accepts username (e.g., 'doejoe') or display name (e.g., 'Joe Doe'). "
+        "If a display name is given, the tool resolves it automatically. "
+        "If multiple users match, candidates are returned for disambiguation.\n\n"
         "USE WHEN: 'delegate user access', 'let someone manage users without Org Admin', "
         "'give RBAC permissions', 'User Access administrator role'.\n\n"
         "BACKGROUND: 'User Access administrator' is a system role with rbac:* permissions. "
@@ -4228,19 +4583,60 @@ def guide_user_access_delegation(
             "existing_assignments": [],
         }
 
-        # Check if user exists
+        # Check if user exists (reuse shared lookup helper)
+        original_input = username
         try:
-            principals_raw = list_principals(request, usernames=username, match_criteria="exact", limit=1)
-            principals_data = json.loads(principals_raw)
-            if principals_data.get("data"):
-                user_data = principals_data["data"][0]
+            _principal, resolved_username, candidates = _lookup_principal(request, username, tenant)
+            if candidates:
                 result["user_info"] = {
-                    "username": user_data.get("username"),
-                    "is_org_admin": user_data.get("is_org_admin", False),
-                    "is_active": user_data.get("is_active", True),
+                    "error": f"Multiple users match '{original_input}'. Please specify the exact username.",
+                    "candidates": candidates,
+                    "hint": "Re-call with the exact username from the candidates list.",
                 }
+            elif resolved_username:
+                username = resolved_username
+                user_info: dict = {"username": username}
+                if resolved_username != original_input:
+                    user_info["resolved_from"] = f"Display name '{original_input}' matched to '{resolved_username}'"
+                # Fetch user details (org admin status, active status) via BOP
+                principals_raw = list_principals(request, usernames=username, match_criteria="exact", limit=1)
+                principals_data = json.loads(principals_raw)
+                if principals_data.get("data"):
+                    user_data = principals_data["data"][0]
+                    user_info["is_org_admin"] = user_data.get("is_org_admin", False)
+                    user_info["is_active"] = user_data.get("is_active", True)
+                result["user_info"] = user_info
             else:
-                result["user_info"] = {"error": f"User '{username}' not found"}
+                # Fuzzy fallback: try display name search
+                original_input = username
+                name_raw = _list_principals_by_name(
+                    request, username, limit=5, offset=0, sort_order="asc", status="enabled"
+                )
+                name_data = json.loads(name_raw)
+                candidates = name_data.get("data", [])
+                if len(candidates) == 1:
+                    user_data = candidates[0]
+                    username = user_data.get("username", username)
+                    result["user_info"] = {
+                        "username": username,
+                        "is_org_admin": user_data.get("is_org_admin", False),
+                        "is_active": user_data.get("is_active", True),
+                        "resolved_from": f"Display name '{original_input}' matched to '{username}'",
+                    }
+                elif len(candidates) > 1:
+                    result["user_info"] = {
+                        "error": f"Multiple users match '{original_input}'",
+                        "candidates": [
+                            {
+                                "username": c.get("username"),
+                                "name": _format_candidate_name(c),
+                            }
+                            for c in candidates
+                        ],
+                        "hint": "Re-call with the exact username from the candidates list.",
+                    }
+                else:
+                    result["user_info"] = {"error": f"User '{original_input}' not found"}
         except Exception as e:
             logger.warning("guide_user_access_delegation: Failed to verify user %s: %s", username, e)
             result["user_info"] = {"error": f"Could not verify user '{username}'"}
@@ -5084,6 +5480,64 @@ def _get_tools() -> list[Any]:
     return asyncio.run(mcp.list_tools())
 
 
+@lru_cache(maxsize=1)
+def _get_tool_schemas() -> dict[str, dict[str, Any]]:
+    """Build a {tool_name: inputSchema} lookup from the cached tool list."""
+    return {tool.name: tool.inputSchema for tool in _get_tools()}
+
+
+def _sanitize_validation_error(error: jsonschema.ValidationError) -> str:
+    """Build a human-readable validation message without exposing internals."""
+    path = ".".join(str(p) for p in error.absolute_path) if error.absolute_path else ""
+    if error.validator == "type":
+        expected = error.schema.get("type", "unknown")
+        actual = type(error.instance).__name__
+        field = f"'{path}'" if path else "input"
+        return f"Expected {field} to be {expected}, got {actual}"
+    if error.validator == "required":
+        if isinstance(error.instance, dict) and error.validator_value:
+            missing = [p for p in error.validator_value if p not in error.instance]
+            if missing:
+                return f"Missing required argument: {missing[0]}"
+        match = re.match(r"'(.+)' is a required property", error.message)
+        field_name = match.group(1) if match else error.message
+        return f"Missing required argument: {field_name}"
+    if error.validator == "additionalProperties":
+        names = re.findall(r"'([^']+)'", error.message)
+        if names:
+            if len(names) == 1:
+                return f"Unknown argument: {names[0]}"
+            return f"Unknown arguments: {', '.join(names)}"
+        return "Unknown argument provided"
+    if path:
+        return f"Validation failed for '{path}': {error.message}"
+    return f"Validation failed: {error.message}"
+
+
+def _validate_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> str | None:
+    """Validate arguments against the tool's JSON schema.
+
+    Injects ``additionalProperties: false`` so unknown arguments are
+    rejected even though FastMCP-generated schemas omit that keyword.
+
+    Returns None on success, or a sanitized error message on failure.
+    """
+    try:
+        schemas = _get_tool_schemas()
+    except Exception:
+        return None
+    schema = schemas.get(tool_name)
+    if schema is None:
+        return None
+    strict_schema = dict(schema)
+    strict_schema.setdefault("additionalProperties", False)
+    try:
+        jsonschema.validate(instance=arguments, schema=strict_schema)
+    except jsonschema.ValidationError as exc:
+        return _sanitize_validation_error(exc)
+    return None
+
+
 def _is_v2_available() -> bool:
     """Check whether V2 API routes are mounted."""
     return getattr(settings, "V2_APIS_ENABLED", False)
@@ -5402,6 +5856,11 @@ def _handle_tools_call(request: HttpRequest, request_id: Any, params: dict[str, 
             return _error_response(request_id, -32003, "Permission denied")
 
     confirmation_token = arguments.pop("confirmation_token", None)
+
+    validation_error = _validate_tool_arguments(tool_name, arguments)
+    if validation_error:
+        logger.warning("mcp: tools/call tool='%s' schema validation failed: %s", tool_name, validation_error)
+        return _error_response(request_id, -32602, f"Invalid params for tool '{tool_name}': {validation_error}")
 
     if config.write and _is_write_confirmation_enabled():
         if confirmation_token:
