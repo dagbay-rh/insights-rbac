@@ -214,6 +214,19 @@ class AuditLog(TenantAwareModel):
         self._apply_source(request)
         super(AuditLog, self).save()
 
+    def log_create_from_object(self, request, resource, object):
+        """Audit Log when a resource is created, using the object directly instead of request data."""
+        self.principal_username = request.user.username
+        self.resource_type = resource
+        self.resource_id = object.id
+        self.resource_uuid = object.uuid
+        resource_name = self._format_resource_type(self.resource_type) + ": " + object.name
+        self.description = "Created " + resource_name
+        self.action = AuditLog.CREATE
+        self.tenant_id = self.get_tenant_id(request)
+        self._apply_source(request)
+        super(AuditLog, self).save()
+
     def log_delete(self, request, resource, object):
         """Audit Log when a role or a group is deleted."""
         self.principal_username = request.user.username

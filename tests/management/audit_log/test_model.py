@@ -83,3 +83,26 @@ class AuditLogModelTests(IdentityRequest):
         audit_log = AuditLog()
         audit_log._apply_source(request)
         self.assertIsNone(audit_log.source)
+
+    def test_log_create_from_object(self):
+        """log_create_from_object creates an audit log entry using the object directly."""
+        from management.group.model import Group
+
+        group = Group.objects.create(
+            name="Custom default access",
+            tenant=self.tenant,
+            platform_default=True,
+            system=False,
+        )
+
+        audit_log = AuditLog()
+        audit_log.log_create_from_object(self.request, AuditLog.GROUP, group)
+
+        self.assertEqual(audit_log.principal_username, self.user_data["username"])
+        self.assertEqual(audit_log.resource_type, AuditLog.GROUP)
+        self.assertEqual(audit_log.resource_id, group.id)
+        self.assertEqual(audit_log.resource_uuid, group.uuid)
+        self.assertEqual(audit_log.description, "Created group: Custom default access")
+        self.assertEqual(audit_log.action, AuditLog.CREATE)
+
+        group.delete()
