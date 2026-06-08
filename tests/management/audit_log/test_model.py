@@ -16,7 +16,6 @@
 #
 """Test the Audit Logs Model."""
 
-from django.test import TestCase
 from unittest.mock import Mock
 
 from management.models import AuditLog
@@ -24,11 +23,15 @@ from tests.identity_request import IdentityRequest
 
 
 class AuditLogModelTests(IdentityRequest):
-    """ "Test the Audit Log Model."""
+    """Test the Audit Log Model."""
 
     def setUp(self):
         """Set up the audit log model tests."""
         super().setUp()
+        self.request = self.request_context["request"]
+        self.request.user = Mock(username=self.user_data["username"])
+        self.request._user = Mock(org_id=self.customer_data["org_id"])
+        self.request.mcp_source = False
 
         self.audit_log = AuditLog.objects.create(
             principal_username="test_user",
