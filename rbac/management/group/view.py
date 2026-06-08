@@ -1315,7 +1315,7 @@ class GroupViewSet(
                 roles = request.data.pop(ROLES_KEY, [])
 
             try:
-                was_system = group.system
+                original_group_pk = group.pk
                 with transaction.atomic():
                     assert_v1_write_allowed(request.tenant)
                     group = set_system_flag_before_update(group, request.tenant, request.user)
@@ -1329,7 +1329,7 @@ class GroupViewSet(
             response_data = GroupRoleSerializerIn(group)
             response = Response(status=status.HTTP_200_OK, data=response_data.data)
             if status.is_success(response.status_code):
-                if was_system and group is not None:
+                if group is not None and group.pk != original_group_pk:
                     auditlog = AuditLog()
                     auditlog.log_create_from_object(request, AuditLog.GROUP, group)
 
@@ -1362,7 +1362,7 @@ class GroupViewSet(
             role_ids = request.query_params.get(ROLES_KEY, "").split(",")
             serializer = GroupRoleSerializerIn(data={"roles": role_ids})
             if serializer.is_valid(raise_exception=True):
-                was_system = group.system
+                original_group_pk = group.pk
                 try:
                     with transaction.atomic():
                         assert_v1_write_allowed(request.tenant)
@@ -1374,8 +1374,8 @@ class GroupViewSet(
                         data={"errors": [{"detail": v2_write_msg}]},
                     )
 
-                # Log custom default group creation if the system group was cloned
-                if was_system and group is not None:
+                # Log custom default group creation if a new group was actually cloned
+                if group is not None and group.pk != original_group_pk:
                     auditlog = AuditLog()
                     auditlog.log_create_from_object(request, AuditLog.GROUP, group)
 
