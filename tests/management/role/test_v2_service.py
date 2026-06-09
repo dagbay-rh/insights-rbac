@@ -53,10 +53,17 @@ class RoleV2ServiceTests(IdentityRequest):
         super().setUp()
         self.service = RoleV2Service(tenant=self.tenant)
 
-        # Create test permissions
-        self.permission1 = Permission.objects.create(permission="inventory:hosts:read", tenant=self.tenant)
-        self.permission2 = Permission.objects.create(permission="inventory:hosts:write", tenant=self.tenant)
-        self.permission3 = Permission.objects.create(permission="cost:reports:read", tenant=self.tenant)
+        # Create test permissions - use get_or_create since permissions are globally unique
+        # and seed_roles() may create these same permissions in the public tenant
+        self.permission1, _ = Permission.objects.get_or_create(
+            permission="inventory:hosts:read", defaults={"tenant": self.tenant}
+        )
+        self.permission2, _ = Permission.objects.get_or_create(
+            permission="inventory:hosts:write", defaults={"tenant": self.tenant}
+        )
+        self.permission3, _ = Permission.objects.get_or_create(
+            permission="cost:reports:read", defaults={"tenant": self.tenant}
+        )
 
         self.permission1_data = {"application": "inventory", "resource_type": "hosts", "operation": "read"}
 
@@ -69,6 +76,7 @@ class RoleV2ServiceTests(IdentityRequest):
         # Also delete V1 system roles in public tenant to avoid stale state
         # when seed_roles() is called by multiple tests
         Role.objects.filter(system=True, tenant__tenant_name="public").delete()
+        # Delete permissions owned by this tenant only (not public tenant permissions from seeding)
         Permission.objects.filter(tenant=self.tenant).delete()
 
         # Clear principal cache to avoid test isolation issues
