@@ -172,7 +172,7 @@ def _update_or_create_roles(roles, config: _SeedRolesConfig, platform_roles=None
             role = _make_role(role_json, config, platform_roles, resource_service)
             current_role_ids.add(role.id)
         except Exception as e:
-            logger.error(f"Failed to update or create system role: {role_json.get("name")} with error: {e}")
+            logger.error(f'Failed to update or create system role: {role_json.get("name")} with error: {e}')
     return current_role_ids
 
 
