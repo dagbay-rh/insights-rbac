@@ -2699,3 +2699,56 @@ def recover_workspace_events(request: HttpRequest) -> JsonResponse:
     except Exception:
         logger.exception("Error enqueuing workspace DR recovery task")
         return JsonResponse({"detail": "Error enqueuing recovery task"}, status=500)
+
+
+@require_http_methods(["POST"])
+def disaster_recovery_reconcile(request):
+    """Trigger disaster recovery reconciliation for Kessel Relations.
+
+    POST /_private/api/disaster_recovery/reconcile/
+
+    Body: {"restore_timestamp": "2024-01-15T10:30:00Z", "buffer_seconds": 300, "dry_run": false}
+    """
+    if not getattr(settings, "DR_RECONCILE_ENABLED", False):
+        return JsonResponse({"error": "Disaster recovery reconciliation is not enabled"}, status=403)
+
+    from datetime import datetime
+
+    from management.tasks import run_disaster_recovery_reconcile
+
+    body = load_request_body(request)
+
+    restore_timestamp_str = body.get("restore_timestamp")
+    if not restore_timestamp_str:
+        return JsonResponse({"error": "restore_timestamp is required"}, status=400)
+
+    try:
+        dt = datetime.fromisoformat(restore_timestamp_str.replace("Z", "+00:00"))
+        restore_timestamp_ms = int(dt.timestamp() * 1000)
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "Invalid restore_timestamp format, expected ISO 8601"}, status=400)
+
+    buffer_seconds = body.get("buffer_seconds", 300)
+    if isinstance(buffer_seconds, bool) or not isinstance(buffer_seconds, int) or buffer_seconds < 0:
+        return JsonResponse({"error": "buffer_seconds must be a non-negative integer"}, status=400)
+
+    dry_run = body.get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        return JsonResponse({"error": "dry_run must be a boolean"}, status=400)
+
+    task = run_disaster_recovery_reconcile.delay(
+        restore_timestamp_ms=restore_timestamp_ms,
+        buffer_seconds=buffer_seconds,
+        dry_run=dry_run,
+    )
+
+    return JsonResponse(
+        {
+            "message": "Disaster recovery reconciliation enqueued.",
+            "task_id": str(task.id),
+            "restore_timestamp_ms": restore_timestamp_ms,
+            "buffer_seconds": buffer_seconds,
+            "dry_run": dry_run,
+        },
+        status=202,
+    )
