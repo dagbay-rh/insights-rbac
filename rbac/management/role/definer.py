@@ -27,7 +27,7 @@ from django.conf import settings
 from django.db import transaction
 from django.db.models import QuerySet
 from django.utils import timezone
-from management.atomic_transactions import atomic
+from management.atomic_transactions import atomic, atomic_with_retry
 from management.group.definer import seed_group
 from management.group.platform import DefaultGroupNotAvailableError, GlobalPolicyIdService
 from management.notifications.notification_handlers import role_obj_change_notification_handler
@@ -86,8 +86,8 @@ class _SeedRolesConfig:
 
 
 # We do each operation in a SERIALIZABLE transaction so that other SERIALIZABLE transactions can have a consistent view
-# of what system roles exist.
-@atomic
+# of what system roles exist. Retry on serialization failures since concurrent seeding can conflict.
+@atomic_with_retry(retries=3)
 def _make_role(data, config: _SeedRolesConfig, platform_roles=None, resource_service=None):
     """Create the role object in the database."""
     public_tenant = Tenant.objects.get(tenant_name="public")
@@ -158,7 +158,12 @@ def _make_role(data, config: _SeedRolesConfig, platform_roles=None, resource_ser
 
 
 def _update_or_create_roles(roles, config: _SeedRolesConfig, platform_roles=None, resource_service=None):
-    """Update or create roles from list."""
+    """Update or create roles from list.
+
+    This function uses all-or-nothing semantics: if any role fails to seed after retries,
+    the entire seeding operation fails. This prevents inconsistent state where V1 roles
+    exist without their corresponding V2 SeededRoleV2 records.
+    """
     current_role_ids = set()
     # Sort roles by name to ensure consistent lock ordering and prevent deadlocks
     sorted_roles = sorted(roles, key=lambda r: r.get("name", ""))
@@ -167,7 +172,7 @@ def _update_or_create_roles(roles, config: _SeedRolesConfig, platform_roles=None
             role = _make_role(role_json, config, platform_roles, resource_service)
             current_role_ids.add(role.id)
         except Exception as e:
-            logger.error(f"Failed to update or create system role: {role_json.get('name')} with error: {e}")
+            logger.error(f'Failed to update or create system role: {role_json.get("name")} with error: {e}')
     return current_role_ids
 
 
