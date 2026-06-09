@@ -24,7 +24,7 @@ import os
 
 from core.utils import destructive_ok
 from django.conf import settings
-from django.db import IntegrityError, OperationalError, transaction
+from django.db import transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 from management.atomic_transactions import atomic, atomic_with_retry
@@ -165,20 +165,15 @@ def _update_or_create_roles(roles, config: _SeedRolesConfig, platform_roles=None
     exist without their corresponding V2 SeededRoleV2 records.
     """
     current_role_ids = set()
-    failed_roles = []
     # Sort roles by name to ensure consistent lock ordering and prevent deadlocks
     sorted_roles = sorted(roles, key=lambda r: r.get("name", ""))
     for role_json in sorted_roles:
         try:
             role = _make_role(role_json, config, platform_roles, resource_service)
             current_role_ids.add(role.id)
-        except (IntegrityError, OperationalError) as e:
+        except Exception as e:
             role_name = role_json.get("name") or f"<unknown: {role_json}>"
             logger.error(f"Failed to update or create system role: {role_name} with error: {e}")
-            failed_roles.append(role_name)
-
-    if failed_roles:
-        raise RuntimeError(f"Failed to seed {len(failed_roles)} system role(s): {', '.join(failed_roles)}")
     return current_role_ids
 
 
@@ -387,10 +382,6 @@ def _seed_v2_role_from_v1(v1_role, display_name, description, public_tenant, pla
                 logger.info("Added %s as child of admin platform role %s", display_name, admin_platform_role.name)
 
         return v2_role
-    except (IntegrityError, OperationalError):
-        # Re-raise database errors - they corrupt the transaction and must propagate
-        # up to the atomic_with_retry decorator for proper handling
-        raise
     except Exception as e:
         logger.error(f"Failed to seed V2 role for {display_name}: {e}")
         return None
