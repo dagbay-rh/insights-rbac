@@ -387,6 +387,10 @@ def _seed_v2_role_from_v1(v1_role, display_name, description, public_tenant, pla
                 logger.info("Added %s as child of admin platform role %s", display_name, admin_platform_role.name)
 
         return v2_role
+    except (IntegrityError, OperationalError):
+        # Re-raise database errors - they corrupt the transaction and must propagate
+        # up to the atomic_with_retry decorator for proper handling
+        raise
     except Exception as e:
         logger.error(f"Failed to seed V2 role for {display_name}: {e}")
         return None
