@@ -24,7 +24,7 @@ import os
 
 from core.utils import destructive_ok
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 from management.atomic_transactions import atomic, atomic_with_retry
@@ -158,7 +158,12 @@ def _make_role(data, config: _SeedRolesConfig, platform_roles=None, resource_ser
 
 
 def _update_or_create_roles(roles, config: _SeedRolesConfig, platform_roles=None, resource_service=None):
-    """Update or create roles from list."""
+    """Update or create roles from list.
+
+    This function uses all-or-nothing semantics: if any role fails to seed after retries,
+    the entire seeding operation fails. This prevents inconsistent state where V1 roles
+    exist without their corresponding V2 SeededRoleV2 records.
+    """
     current_role_ids = set()
     failed_roles = []
     # Sort roles by name to ensure consistent lock ordering and prevent deadlocks
@@ -167,8 +172,8 @@ def _update_or_create_roles(roles, config: _SeedRolesConfig, platform_roles=None
         try:
             role = _make_role(role_json, config, platform_roles, resource_service)
             current_role_ids.add(role.id)
-        except Exception as e:
-            role_name = role_json.get("name")
+        except (IntegrityError, OperationalError) as e:
+            role_name = role_json.get("name") or f"<unknown: {role_json}>"
             logger.error(f"Failed to update or create system role: {role_name} with error: {e}")
             failed_roles.append(role_name)
 
