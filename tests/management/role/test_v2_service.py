@@ -62,9 +62,13 @@ class RoleV2ServiceTests(IdentityRequest):
 
     def tearDown(self):
         """Tear down RoleV2Service tests."""
+        from management.models import Role
         from management.utils import PRINCIPAL_CACHE
 
         RoleV2.objects.all().delete()
+        # Also delete V1 system roles in public tenant to avoid stale state
+        # when seed_roles() is called by multiple tests
+        Role.objects.filter(system=True, tenant__tenant_name="public").delete()
         Permission.objects.filter(tenant=self.tenant).delete()
 
         # Clear principal cache to avoid test isolation issues
