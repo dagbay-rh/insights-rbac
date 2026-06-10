@@ -410,8 +410,8 @@ class RoleBindingOutputSerializer(serializers.Serializer):
         """Extract subject information from the Group or Principal.
 
         Default (no fields param): Returns only id and type.
-        With fields param: Only type is always included. Other fields
-        (including id) are only included if explicitly requested.
+        With fields param: id and type are always included. Other fields
+        are only included if explicitly requested.
         """
         if isinstance(obj, Principal):
             return self._build_subject(obj, "user")
@@ -438,15 +438,11 @@ class RoleBindingOutputSerializer(serializers.Serializer):
                 "type": subject_type,
             }
 
-        # With fields param: type is always included
-        subject: dict = {"type": subject_type}
-
-        # Check if id is explicitly requested
-        subject_fields = field_selection.get_nested("subject")
-        if "id" in subject_fields:
-            subject["id"] = obj.uuid
+        # With fields param: type and id are always included
+        subject: dict = {"type": subject_type, "id": obj.uuid}
 
         # Extract field names from "{subject_type}.X" paths
+        subject_fields = field_selection.get_nested("subject")
         prefix = f"{subject_type}."
         prefix_len = len(prefix)
         fields_to_include = set()
@@ -719,12 +715,8 @@ class RoleBindingOutputSerializerMixin:
                 "type": _SUBJECT_TYPE_GROUP,
             }
 
-        # With fields param: type is always included
-        subject: dict = {"type": _SUBJECT_TYPE_GROUP}
-
-        # Check if id is explicitly requested
-        if "id" in field_selection.get_nested("subject"):
-            subject["id"] = group.uuid
+        # With fields param: type and id are always included
+        subject: dict = {"type": _SUBJECT_TYPE_GROUP, "id": group.uuid}
 
         # Extract group.* fields
         group_details = self._extract_group_details(group, field_selection)
@@ -783,8 +775,8 @@ class RoleBindingListOutputSerializer(RoleBindingOutputSerializerMixin, serializ
         Checks group_entries first, then principal_entries.
 
         Default (no fields param): Returns only id and type.
-        With fields param: Only type is always included. Other fields
-        (including id) are only included if explicitly requested.
+        With fields param: id and type are always included. Other fields
+        are only included if explicitly requested.
         """
         field_selection = self._get_field_selection()
 
@@ -804,10 +796,7 @@ class RoleBindingListOutputSerializer(RoleBindingOutputSerializerMixin, serializ
                 principal = first_entry[0].principal
                 if field_selection is None:
                     return {"id": principal.uuid, "type": _SUBJECT_TYPE_USER}
-                subject = {"type": _SUBJECT_TYPE_USER}
-                if "id" in field_selection.get_nested("subject"):
-                    subject["id"] = principal.uuid
-                return subject
+                return {"type": _SUBJECT_TYPE_USER, "id": principal.uuid}
 
         return {"type": _SUBJECT_TYPE_GROUP}
 
@@ -950,7 +939,7 @@ class RoleBindingFieldMaskingMixin:
     * With ``field_selection``: only explicitly requested fields appear
       and unrequested top-level sections are stripped entirely. Subject
       objects always include ``type`` (OpenAPI discriminator for
-      UserSubject | GroupSubject) even when not listed in ``fields``.
+      UserSubject | GroupSubject) and ``id`` even when not listed in ``fields``.
     """
 
     def __init__(self, *args, **kwargs):
@@ -984,13 +973,10 @@ class RoleBindingFieldMaskingMixin:
                 subject["user"] = {"username": subject_obj.username}
             return subject
 
-        subject = {}
         subject_fields = field_selection.get_nested("subject")
 
-        # UserSubject / GroupSubject require ``type`` for valid JSON and generated clients.
-        subject["type"] = subject_type
-        if "id" in subject_fields:
-            subject["id"] = subject_obj.uuid
+        # type and id are always included — they form the minimum required structure.
+        subject = {"type": subject_type, "id": subject_obj.uuid}
 
         if subject_type == SubjectType.GROUP:
             group_details = self._extract_nested_fields("group.", subject_fields, subject_obj)
