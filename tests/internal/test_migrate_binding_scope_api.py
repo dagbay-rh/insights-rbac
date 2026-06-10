@@ -19,7 +19,6 @@ import uuid
 from api.cross_access.model import CrossAccountRequest
 from unittest.mock import patch, Mock
 from django.contrib.auth.models import User as DjangoUser
-from django.db import transaction
 from django.test import TestCase, override_settings
 from management.group.definer import add_roles, clone_default_group_in_public_schema, seed_group
 from management.group.model import Group
@@ -875,34 +874,12 @@ class SystemRoleBindingMigrationTest(TestCase):
         REPLICATION_TO_RELATION_ENABLED=True,
     )
     def test_v2_tenant_not_migrated(self):
-        # Create system role manually instead of using RbacFixture to avoid transaction issues
-        system_role = Role.objects.create(
-            name="system role",
-            system=True,
-            platform_default=False,
-            admin_default=False,
-            tenant=self.public_tenant,
-        )
+        fixture = RbacFixture()
 
-        # Create permission and access
-        permission = Permission.objects.get_or_create(permission="rbac:*:*", tenant=self.public_tenant)[0]
-        Access.objects.create(permission=permission, role=system_role, tenant=self.public_tenant)
+        system_role = fixture.new_system_role(name="system role", permissions=["rbac:*:*"])
 
-        # Seed v2 role
-        seed_v2_role_from_v1(system_role)
-
-        # Create group and add role
         group = Group.objects.create(name="Test Group No Bindings", tenant=self.tenant)
-
-        # Add role to group manually
-        policy, _ = Policy.objects.get_or_create(
-            name=f"System Policy for Group {group.uuid}",
-            system=True,
-            group=group,
-            tenant=group.tenant,
-        )
-        policy.roles.add(system_role)
-        policy.save()
+        fixture.add_role_to_group(system_role, group)
 
         replicator = InMemoryRelationReplicator(self.tuples)
 
@@ -926,8 +903,7 @@ class SystemRoleBindingMigrationTest(TestCase):
             ),
         )
 
-        with transaction.atomic():
-            ensure_v2_write_activated(self.tenant)
+        ensure_v2_write_activated(self.tenant)
 
         with self.settings(ROOT_SCOPE_PERMISSIONS="rbac:*:*"):
             migrate_all_role_bindings(replicator)

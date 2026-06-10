@@ -53,8 +53,8 @@ class SystemRoleBindingScopeUpdateTests(DualWriteTestCase):
         super().setUp()
         self.public_tenant = Tenant.objects.get(tenant_name="public")
 
-        # Deactivate V2 writes to make this a V1 tenant
-        # This ensures _determine_old_scopes can find the bindings
+        # Deactivate V2 writes to make this a V1 tenant for testing
+        # This is required because _determine_old_scopes only checks V1 tenants
         TenantMapping.objects.filter(tenant=self.tenant).update(v2_write_activated_at=None)
 
     @patch("management.relation_replicator.outbox_replicator.OutboxReplicator.replicate")

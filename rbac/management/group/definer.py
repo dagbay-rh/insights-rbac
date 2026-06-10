@@ -22,11 +22,11 @@ from typing import Optional, Tuple, Union
 from uuid import uuid4
 
 from django.conf import settings
+from django.db import transaction
 from django.db.models.query import QuerySet
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils.translation import gettext as _
-from management.atomic_transactions import atomic_block
 from management.group.model import Group
 from management.group.platform import GlobalPolicyIdService
 from management.group.relation_api_dual_write_group_handler import (
@@ -50,61 +50,44 @@ from api.models import Tenant
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
 
-def _seed_group_impl(public_tenant):
-    """Create or update default and admin default groups.
-
-    Separated from seed_group to allow calling from both within and outside transactions.
-    """
-    # 'Default access' group
-    name = "Default access"
-    group_description = (
-        "This group contains the roles that all users inherit by default. "
-        "Adding or removing roles in this group will affect permissions for all users in your organization."
-    )
-
-    group, _ = Group.objects.get_or_create(
-        platform_default=True,
-        defaults={"description": group_description, "name": name, "system": True},
-        tenant=public_tenant,
-    )
-
-    platform_roles = Role.objects.filter(platform_default=True).public_tenant_only()
-    update_group_roles(group, platform_roles, public_tenant)
-    logger.info("Finished seeding default group %s.", name)
-
-    # 'Default admin access' group
-    admin_name = "Default admin access"
-    admin_group_description = (
-        "This group contains the roles that all org admin users inherit by default. "
-        "Adding or removing roles in this group will affect permissions for all org admin users in your org."
-    )
-    admin_group, _ = Group.objects.get_or_create(
-        admin_default=True,
-        defaults={"description": admin_group_description, "name": admin_name, "system": True},
-        tenant=public_tenant,
-    )
-    admin_roles = Role.objects.filter(admin_default=True).public_tenant_only()
-    update_group_roles(admin_group, admin_roles, public_tenant)
-    logger.info("Finished seeding default org admin group %s.", name)
-
-    return group, admin_group
-
-
 def seed_group() -> Tuple[Group, Group]:
     """Create or update default group."""
     try:
-        from django.db import connection
-
         public_tenant = Tenant.objects.get(tenant_name="public")
+        with transaction.atomic():
+            # 'Default access' group
+            name = "Default access"
+            group_description = (
+                "This group contains the roles that all users inherit by default. "
+                "Adding or removing roles in this group will affect permissions for all users in your organization."
+            )
 
-        # If we're already in a transaction (e.g., from a test), don't create a new atomic block
-        # to avoid "SET TRANSACTION ISOLATION LEVEL must be called before any query" errors
-        if connection.in_atomic_block:
-            # Already in a transaction, proceed without atomic_block
-            return _seed_group_impl(public_tenant)
+            group, _ = Group.objects.get_or_create(
+                platform_default=True,
+                defaults={"description": group_description, "name": name, "system": True},
+                tenant=public_tenant,
+            )
 
-        with atomic_block():
-            return _seed_group_impl(public_tenant)
+            platform_roles = Role.objects.filter(platform_default=True).public_tenant_only()
+            update_group_roles(group, platform_roles, public_tenant)
+            logger.info("Finished seeding default group %s.", name)
+
+            # 'Default admin access' group
+            admin_name = "Default admin access"
+            admin_group_description = (
+                "This group contains the roles that all org admin users inherit by default. "
+                "Adding or removing roles in this group will affect permissions for all org admin users in your org."
+            )
+            admin_group, _ = Group.objects.get_or_create(
+                admin_default=True,
+                defaults={"description": admin_group_description, "name": admin_name, "system": True},
+                tenant=public_tenant,
+            )
+            admin_roles = Role.objects.filter(admin_default=True).public_tenant_only()
+            update_group_roles(admin_group, admin_roles, public_tenant)
+            logger.info("Finished seeding default org admin group %s.", name)
+
+        return group, admin_group
     finally:
         # Do this after updating the groups to ensure that any subsequent calls receive the correct value.
         GlobalPolicyIdService.clear_shared()
@@ -174,12 +157,7 @@ def clone_default_group_in_public_schema(group, tenant) -> Optional[Group]:
 
 
 def add_roles(group, roles_or_role_ids, tenant, user=None):
-    """Process list of roles and add them to the group.
-
-    Note: This function should be called within a SERIALIZABLE transaction when adding
-    system roles to prevent race conditions during scope migrations. The caller is
-    responsible for ensuring the appropriate transaction isolation level.
-    """
+    """Process list of roles and add them to the group."""
     roles = _roles_by_query_or_ids(roles_or_role_ids, tenant)
     group_name = group.name
     group, created = Group.objects.get_or_create(name=group_name, tenant=tenant)

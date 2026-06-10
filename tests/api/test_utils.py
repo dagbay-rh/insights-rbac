@@ -1,4 +1,4 @@
-from django.test import TransactionTestCase
+from django.test import TestCase
 
 
 from api.models import Tenant
@@ -10,7 +10,7 @@ from management.tenant_mapping.model import TenantMapping
 from management.tenant_service.v2 import V2TenantBootstrapService
 
 
-class TestAPIUtils(TransactionTestCase):
+class TestAPIUtils(TestCase):
     def setUp(self):
         """Set up test fixtures."""
         # Create public tenant and seed default groups
