@@ -405,6 +405,130 @@ class PrincipalCache(BasicCache):
             logger.info(f"Deleted {count} principals for tenant {org_id}")
 
 
+class WorkspaceCache(BasicCache):
+    """Redis-based caching for immutable root and default workspaces.
+
+    Two key namespaces:
+    - Model cache: stores pickled Workspace instances (TTL: PRINCIPAL_CACHE_LIFETIME, 3600s)
+    - Response cache: stores serialized API responses (TTL: ACCESS_CACHE_LIFETIME, 600s)
+
+    Only caches built-in (root/default) workspaces which are per-tenant immutable singletons.
+    """
+
+    def key_for(self, org_id: str, workspace_type: str) -> str:
+        """Generate cache key for a workspace model."""
+        return f"rbac::workspace::{org_id}::{workspace_type}"
+
+    def response_key_for(self, org_id: str, cache_key: str) -> str:
+        """Generate cache key for a cached API response."""
+        return f"rbac::workspace::response::{org_id}::{cache_key}"
+
+    def set_cache(self, pipe: Pipeline, key: str, item):
+        """Set workspace model to cache."""
+        pipe.set(name=key, value=pickle.dumps(item))
+        pipe.expire(name=key, time=settings.PRINCIPAL_CACHE_LIFETIME)
+        pipe.execute()
+
+    def get_from_redis(self, key: str):
+        """Get workspace from redis."""
+        obj = self.connection.get(name=key)
+        if obj:
+            return pickle.loads(obj)
+        return None
+
+    def get_workspace(self, org_id: str, workspace_type: str):
+        """Fetch a workspace from cache by org_id and type.
+
+        :param org_id: The tenant's org_id.
+        :param workspace_type: The workspace type (root or default).
+        :returns: The Workspace instance or None.
+        """
+        if not settings.ACCESS_CACHE_ENABLED:
+            return None
+        return super().get_cached(
+            self.key_for(org_id, workspace_type),
+            f"Unable to fetch workspace ({workspace_type}) from cache for org {org_id}",
+        )
+
+    def cache_workspace(self, org_id: str, workspace):
+        """Cache a workspace instance.
+
+        :param org_id: The tenant's org_id.
+        :param workspace: The Workspace model instance to cache.
+        """
+        if not settings.ACCESS_CACHE_ENABLED:
+            return
+        super().save(
+            key=self.key_for(org_id, workspace.type),
+            item=workspace,
+            obj_name="workspace",
+        )
+
+    def get_response(self, org_id: str, cache_key: str):
+        """Fetch a cached API response.
+
+        :param org_id: The tenant's org_id.
+        :param cache_key: The cache key suffix (e.g. workspace type or workspace id).
+        :returns: The cached response data (dict) or None.
+        """
+        if not settings.ACCESS_CACHE_ENABLED:
+            return None
+        try:
+            if self.redis_health_check() is True:
+                key = self.response_key_for(org_id, cache_key)
+                obj = self.connection.get(name=key)
+                if obj:
+                    return json.loads(obj)
+            else:
+                self.disable_caching()
+        except exceptions.RedisError:
+            logger.exception(f"Error fetching workspace response cache for org {org_id}")
+        return None
+
+    def cache_response(self, org_id: str, cache_key: str, data):
+        """Cache an API response.
+
+        :param org_id: The tenant's org_id.
+        :param cache_key: The cache key suffix.
+        :param data: The response data (must be JSON-serializable).
+        """
+        if not settings.ACCESS_CACHE_ENABLED:
+            return
+        try:
+            key = self.response_key_for(org_id, cache_key)
+            logger.info(f"Caching workspace response for org {org_id} key {cache_key}")
+            with self.connection.pipeline() as pipe:
+                pipe.set(name=key, value=json.dumps(data))
+                pipe.expire(name=key, time=settings.ACCESS_CACHE_LIFETIME)
+                pipe.execute()
+        except exceptions.RedisError:
+            logger.exception(f"Error writing workspace response cache for org {org_id}")
+
+    def delete_workspaces_for_tenant(self, org_id: str):
+        """Invalidate all workspace caches (model + response) for a tenant.
+
+        :param org_id: The tenant's org_id.
+        """
+        err_msg = f"Error deleting workspace cache for tenant {org_id}"
+        with self.delete_handler(err_msg):
+            logger.info(f"Deleting entire workspace cache for tenant {org_id}")
+            count = 0
+            pipeline = self.connection.pipeline()
+            for key in self.connection.scan_iter(match=f"rbac::workspace::{org_id}::*", count=BATCH_DELETE_SIZE):
+                pipeline.delete(key)
+                count += 1
+            for key in self.connection.scan_iter(
+                match=f"rbac::workspace::response::{org_id}::*", count=BATCH_DELETE_SIZE
+            ):
+                pipeline.delete(key)
+                count += 1
+            pipeline.execute()
+            logger.info(f"Deleted {count} workspace cache entries for tenant {org_id}")
+
+
+WORKSPACE_CACHE = WorkspaceCache()
+
+
 def skip_purging_cache_for_public_tenant(tenant):
     """Skip purging cache for public tenant."""
     # Cache is by tenant org_id and user_id, we don't have to purge cache for public tenant

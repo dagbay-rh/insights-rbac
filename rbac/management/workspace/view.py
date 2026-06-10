@@ -26,6 +26,7 @@ from django_filters import rest_framework as filters
 from management.atomic_transactions import atomic_with_retry
 from management.audit_log.model import AuditLog
 from management.base_viewsets import BaseV2ViewSet
+from management.cache import WORKSPACE_CACHE
 from management.filters import ValidatedOrderingFilter
 from management.permissions.workspace_access import WorkspaceAccessPermission
 from management.utils import v2response_error_from_errors, validate_and_get_key
@@ -186,27 +187,86 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
                     raise serializers.ValidationError(error_message)
             raise
 
+    def _get_org_id(self, request):
+        """Resolve org_id from the request tenant."""
+        tenant = getattr(request, "tenant", None)
+        if tenant and hasattr(tenant, "org_id"):
+            return tenant.org_id
+        return None
+
+    @staticmethod
+    def _is_single_builtin_type_filter(validated_params):
+        """Check if the request filters for exactly one built-in workspace type with no other filters.
+
+        Returns the workspace type string ('root' or 'default') if cacheable, None otherwise.
+        """
+        type_filter = validated_params.get("type")
+        name = validated_params.get("name")
+        parent_id = validated_params.get("parent_id")
+        ids = validated_params.get("ids")
+
+        if name or parent_id or ids:
+            return None
+
+        if type_filter and len(type_filter) == 1:
+            ws_type = type_filter[0]
+            if ws_type in (Workspace.Types.ROOT, Workspace.Types.DEFAULT):
+                return ws_type
+
+        return None
+
     def retrieve(self, request, *args, **kwargs):
-        """Get a workspace."""
-        return super().retrieve(request=request, args=args, kwargs=kwargs)
+        """Get a workspace, with response caching for built-in workspaces."""
+        org_id = self._get_org_id(request)
+        pk = kwargs.get("pk")
+
+        if org_id and pk:
+            cached_response = WORKSPACE_CACHE.get_response(org_id, f"retrieve::{pk}")
+            if cached_response is not None:
+                return Response(cached_response)
+
+        response = super().retrieve(request=request, args=args, kwargs=kwargs)
+
+        if org_id and response.status_code == 200:
+            ws_type = response.data.get("type")
+            if ws_type in (Workspace.Types.ROOT, Workspace.Types.DEFAULT):
+                WORKSPACE_CACHE.cache_response(org_id, f"retrieve::{pk}", response.data)
+
+        return response
 
     def _filtered_list_response(self, validated_params):
         """Shared implementation for list and query actions.
 
         Both endpoints produce the same paginated workspace response; the only
         difference is how validated_params are obtained (query string vs POST body).
+
+        Responses for built-in workspace types (root, default) are cached when
+        requested as a single type filter with no other filters.
         """
         # Bridge param to access layer; read by WorkspaceAccessFilterBackend
         # via getattr(request, "with_ancestry", False) and passed to
         # is_user_allowed_v2(with_ancestry=...).
         self.request.with_ancestry = validated_params.get("with_ancestry", False)
 
+        org_id = self._get_org_id(self.request)
+        cacheable_type = self._is_single_builtin_type_filter(validated_params)
+
+        if org_id and cacheable_type:
+            cached_response = WORKSPACE_CACHE.get_response(org_id, f"list::{cacheable_type}")
+            if cached_response is not None:
+                return Response(cached_response)
+
         queryset = self.filter_queryset(self.get_queryset())
         queryset = self._service.list(queryset, validated_params)
 
         page = self.paginate_queryset(queryset)
         serializer = self.get_serializer(page, many=True)
-        return self.get_paginated_response(serializer.data)
+        response = self.get_paginated_response(serializer.data)
+
+        if org_id and cacheable_type:
+            WORKSPACE_CACHE.cache_response(org_id, f"list::{cacheable_type}", response.data)
+
+        return response
 
     def list(self, request, *args, **kwargs):
         """Get a list of workspaces.
@@ -215,6 +275,9 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
         Ordering is handled by OrderingFilter (supports ?order_by=name or ?order_by=-name).
         Domain filters (type, name, parent_id, ids) are validated by
         WorkspaceListInputSerializer and applied by WorkspaceService.list().
+
+        Responses for built-in workspace types (root, default) are cached when requested
+        as a single type filter with no other filters.
         """
         input_serializer = WorkspaceListInputSerializer(data=request.query_params)
         input_serializer.is_valid(raise_exception=True)
