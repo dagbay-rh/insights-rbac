@@ -241,6 +241,14 @@ LOGGING_FORMATTER = os.getenv("DJANGO_LOG_FORMATTER", "simple")
 DJANGO_LOGGING_LEVEL = os.getenv("DJANGO_LOG_LEVEL", "INFO")
 RBAC_LOGGING_LEVEL = os.getenv("RBAC_LOG_LEVEL", "INFO")
 LOGGING_HANDLERS = os.getenv("DJANGO_LOG_HANDLERS", "console").split(",")
+
+# Deduplicate stream handlers: 'console' and 'ecs' both write to stderr.
+# Having both produces duplicate log lines for every event. When both are
+# specified, keep only 'ecs' (structured JSON for CloudWatch / log aggregation).
+# Use DJANGO_LOG_HANDLERS=console for plain-text development output.
+if "console" in LOGGING_HANDLERS and "ecs" in LOGGING_HANDLERS:
+    LOGGING_HANDLERS = [h for h in LOGGING_HANDLERS if h != "console"]
+
 ENV_NAME = os.getenv("ENV_NAME", "stage")
 VERBOSE_FORMATTING = "%(levelname)s %(asctime)s [%(env_name)s] %(module)s %(process)d %(thread)d %(message)s"
 
