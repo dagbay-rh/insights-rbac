@@ -470,6 +470,7 @@ except ValueError as e:
 
 KAFKA_ENABLED = ENVIRONMENT.get_value("KAFKA_ENABLED", default=False)
 MOCK_KAFKA = ENVIRONMENT.get_value("MOCK_KAFKA", default=False)
+MOCK_REDIS = ENVIRONMENT.get_value("MOCK_REDIS", default=False)
 
 NOTIFICATIONS_ENABLED = ENVIRONMENT.get_value("NOTIFICATIONS_ENABLED", default=False)
 NOTIFICATIONS_RH_ENABLED = ENVIRONMENT.get_value("NOTIFICATIONS_RH_ENABLED", default=False)
