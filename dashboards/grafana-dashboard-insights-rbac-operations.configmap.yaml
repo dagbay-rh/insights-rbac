@@ -2170,7 +2170,7 @@ data:
                     "uid": "$datasource"
                   },
                   "editorMode": "code",
-                  "expr": "rate(rbac_workspace_cache_total{job=\"rbac-service\", result=\"hit\"}[5m]) / rate(rbac_workspace_cache_total{job=\"rbac-service\"}[5m])",
+                  "expr": "sum by (cache_layer)(rate(rbac_workspace_cache_total{job=\"rbac-service\", result=\"hit\"}[5m])) / sum by (cache_layer)(rate(rbac_workspace_cache_total{job=\"rbac-service\"}[5m]))",
                   "legendFormat": "{{cache_layer}}",
                   "range": true,
                   "refId": "A"
