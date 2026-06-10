@@ -34,30 +34,33 @@ insights-rbac is a Django REST Framework microservice providing Role-Based Acces
 
 ### Testing
 
-Django's test runner requires **dotted module paths**, not file paths. If `tox` is not on PATH, use `pipenv run tox`.
+Django's test runner requires **dotted module paths**, not file paths. Use `tox -r` to match CI (Tekton pipeline).
 
 ```bash
-# Run all tests (with coverage)
-pipenv run tox -e py312
+# Run all environments (lint + tests + mypy), same as CI
+tox -r
+
+# Run all tests with coverage
+tox -r -e py312
 
 # Run all tests without coverage (faster)
-pipenv run tox -e py312-fast
+tox -r -e py312-fast
 
 # Run a specific test module
-pipenv run tox -e py312-fast -- tests.management.workspace.test_view
+tox -r -e py312-fast -- tests.management.workspace.test_view
 
 # Run a specific test class
-pipenv run tox -e py312-fast -- tests.management.workspace.test_view.WorkspaceTestsList
+tox -r -e py312-fast -- tests.management.workspace.test_view.WorkspaceTestsList
 
 # Run a single test method
-pipenv run tox -e py312-fast -- tests.management.workspace.test_view.WorkspaceTestsList.test_workspace_list_unfiltered
+tox -r -e py312-fast -- tests.management.workspace.test_view.WorkspaceTestsList.test_workspace_list_unfiltered
 ```
 
 ### Linting and Formatting
 
 ```bash
-pipenv run tox -e lint                             # flake8 + black --check
-pipenv run black -t py312 -l 119 rbac tests        # auto-format
+tox -r -e lint                                     # flake8 + black --check
+black -t py312 -l 119 rbac tests                   # auto-format
 ```
 
 ### Local Development
@@ -98,7 +101,7 @@ The `.pre-commit-config.yaml` enforces:
 - django-upgrade (target 5.2)
 - openapi-spec-validator
 
-Run manually: `pipenv run pre-commit run --all-files`
+Run manually: `pre-commit run --all-files`
 
 ## Key Conventions
 
