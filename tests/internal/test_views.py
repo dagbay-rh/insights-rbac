@@ -2166,8 +2166,8 @@ class InternalViewsetTests(BaseInternalViewsetTests):
         car = CrossAccountRequest.objects.create(
             target_org="123456",
             user_id="1111111",
-            start_date=datetime.now(),
-            end_date=datetime.now() + timedelta(10),
+            start_date=datetime.now(tz=timezone.utc),
+            end_date=datetime.now(tz=timezone.utc) + timedelta(10),
             status="approved",
         )
         car.roles.add(*(system_role, custom_role))

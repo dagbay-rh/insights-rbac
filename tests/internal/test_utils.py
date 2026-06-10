@@ -109,7 +109,9 @@ class ReplicateMissingBindingTuplesTest(TestCase):
 
         def create_car():
             car = CrossAccountRequest.objects.create(
-                target_org=self.tenant.org_id, user_id=principal.user_id, end_date=datetime.date(9999, 1, 1)
+                target_org=self.tenant.org_id,
+                user_id=principal.user_id,
+                end_date=datetime.datetime(9999, 1, 1, tzinfo=datetime.timezone.utc),
             )
 
             car.roles.set([role])
