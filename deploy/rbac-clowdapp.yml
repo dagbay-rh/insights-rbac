@@ -1908,7 +1908,7 @@ parameters:
   value: '1'
 - name: POSTGRES_EXPORTER_IMAGE
   description: Postgres exporter image
-  value: quay.io/prometheuscommunity/postgres-exporter:v0.10.1
+  value: quay.io/prometheuscommunity/postgres-exporter:v0.19.1
 - name: POSTGRES_EXPORTER_CPU_REQUEST
   description: Postgres exporter CPU request
   value: 1m
