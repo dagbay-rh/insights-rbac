@@ -24,7 +24,9 @@ from rest_framework import status
 from rest_framework.test import APIClient
 from django.test import override_settings
 from django.urls import reverse
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
+
+from django.utils import timezone
 from unittest.mock import MagicMock
 from unittest.mock import patch
 from kessel.relations.v1beta1 import common_pb2
@@ -143,10 +145,10 @@ class InternalViewsetTests(BaseInternalViewsetTests):
     """Test the internal viewset."""
 
     def valid_destructive_time():
-        return datetime.now(timezone.utc).replace(tzinfo=pytz.UTC) + timedelta(hours=1)
+        return timezone.now() + timedelta(hours=1)
 
     def invalid_destructive_time():
-        return datetime.now(timezone.utc).replace(tzinfo=pytz.UTC) - timedelta(hours=1)
+        return timezone.now() - timedelta(hours=1)
 
     def test_delete_tenant_disallowed(self):
         """Test that we cannot delete a tenant when disallowed."""
@@ -2166,8 +2168,8 @@ class InternalViewsetTests(BaseInternalViewsetTests):
         car = CrossAccountRequest.objects.create(
             target_org="123456",
             user_id="1111111",
-            start_date=datetime.now(tz=timezone.utc),
-            end_date=datetime.now(tz=timezone.utc) + timedelta(10),
+            start_date=timezone.now(),
+            end_date=timezone.now() + timedelta(10),
             status="approved",
         )
         car.roles.add(*(system_role, custom_role))
@@ -3745,11 +3747,11 @@ class InternalS2SViewsetTests(IdentityRequest):
 
 
 def valid_destructive_time():
-    return datetime.now(timezone.utc).replace(tzinfo=pytz.UTC) + timedelta(hours=1)
+    return timezone.now() + timedelta(hours=1)
 
 
 def invalid_destructive_time():
-    return datetime.now(timezone.utc).replace(tzinfo=pytz.UTC) - timedelta(hours=1)
+    return timezone.now() - timedelta(hours=1)
 
 
 class InternalRelationsViewsetTests(BaseInternalViewsetTests):
