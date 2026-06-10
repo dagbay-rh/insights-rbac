@@ -1316,7 +1316,8 @@ class GroupViewSet(
                 roles = request.data.pop(ROLES_KEY, [])
 
             try:
-                with atomic_block():
+                original_group_pk = group.pk
+                with transaction.atomic():
                     assert_v1_write_allowed(request.tenant)
                     group = set_system_flag_before_update(group, request.tenant, request.user)
                     add_roles(group, roles, request.tenant, user=request.user)
@@ -1329,6 +1330,10 @@ class GroupViewSet(
             response_data = GroupRoleSerializerIn(group)
             response = Response(status=status.HTTP_200_OK, data=response_data.data)
             if status.is_success(response.status_code):
+                if group is not None and group.pk != original_group_pk:
+                    auditlog = AuditLog()
+                    auditlog.log_create_from_object(request, AuditLog.GROUP, group)
+
                 for role in response_data.data["data"]:
                     auditlog = AuditLog()
                     auditlog.log_group_assignment(
@@ -1358,6 +1363,7 @@ class GroupViewSet(
             role_ids = request.query_params.get(ROLES_KEY, "").split(",")
             serializer = GroupRoleSerializerIn(data={"roles": role_ids})
             if serializer.is_valid(raise_exception=True):
+                original_group_pk = group.pk
                 try:
                     with transaction.atomic():
                         assert_v1_write_allowed(request.tenant)
@@ -1368,6 +1374,11 @@ class GroupViewSet(
                         status=status.HTTP_403_FORBIDDEN,
                         data={"errors": [{"detail": v2_write_msg}]},
                     )
+
+                # Log custom default group creation if a new group was actually cloned
+                if group is not None and group.pk != original_group_pk:
+                    auditlog = AuditLog()
+                    auditlog.log_create_from_object(request, AuditLog.GROUP, group)
 
                 # Save the information to audit logs
                 roles = _roles_by_query_or_ids(role_ids, request.tenant)
