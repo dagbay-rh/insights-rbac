@@ -37,18 +37,24 @@ BATCH_DELETE_SIZE = 1000
 
 
 class BasicCache:
-    """Basic cache class to be inherited."""
+    """Basic cache class to be inherited.
+
+    When MOCK_REDIS is enabled, all Redis operations become no-ops.
+    The _redis_mocked flag centralizes this check so individual methods
+    do not need to call _is_mock_redis() directly.
+    """
 
     def __init__(self):
         """Init the class."""
         self._connection = None
-        self.use_caching = not _is_mock_redis()
+        self._redis_mocked = _is_mock_redis()
+        self.use_caching = not self._redis_mocked
 
     @property
     def connection(self):
-        """Get Redis connection from the pool."""
-        if _is_mock_redis():
-            raise RuntimeError("Redis is mocked (MOCK_REDIS=True). Cache operations should be short-circuited.")
+        """Get Redis connection from the pool. Returns None when Redis is mocked."""
+        if self._redis_mocked:
+            return None
         if not self._connection:
             self._connection = Redis(connection_pool=_get_connection_pool(), ssl=settings.REDIS_SSL)
             try:
@@ -74,7 +80,7 @@ class BasicCache:
 
     def redis_health_check(self):
         """Check whether redis cache is reachable. If it is not reachable, then disable caching."""
-        if _is_mock_redis():
+        if self._redis_mocked:
             return False
         self._connection = Redis(connection_pool=_get_connection_pool(), ssl=settings.REDIS_SSL)
         try:
@@ -104,7 +110,7 @@ class BasicCache:
 
     def get_cached(self, key, error_message):
         """Get cached object from redis, throw error if there is any."""
-        if _is_mock_redis():
+        if self._redis_mocked:
             return None
         try:
             if self.redis_health_check() is True:
@@ -121,7 +127,7 @@ class BasicCache:
 
     def delete_cached(self, key, obj_name):
         """Delete cache from redis."""
-        if _is_mock_redis():
+        if self._redis_mocked:
             return
         err_msg = f"Error deleting {obj_name} for {key}"
         with self.delete_handler(err_msg):
@@ -134,7 +140,7 @@ class BasicCache:
 
     def save(self, key, item, obj_name):
         """Save cache including exception handler."""
-        if _is_mock_redis():
+        if self._redis_mocked:
             return
         try:
             logger.info(f"Caching {obj_name} for {key}")
@@ -223,7 +229,7 @@ class AccessCache(BasicCache):
 
     def delete_all_policies_for_tenant(self):
         """Purge users' policies for a given tenant from the cache."""
-        if not settings.ACCESS_CACHE_ENABLED or _is_mock_redis():
+        if not settings.ACCESS_CACHE_ENABLED or self._redis_mocked:
             return
         err_msg = f"Error deleting all policies for tenant {self.tenant}"
         with self.delete_handler(err_msg):
@@ -381,7 +387,7 @@ class PrincipalCache(BasicCache):
 
         :param org_id: The tenant org_id to clear principals for.
         """
-        if _is_mock_redis():
+        if self._redis_mocked:
             return
         err_msg = f"Error deleting all principals for tenant {org_id}"
         with self.delete_handler(err_msg):

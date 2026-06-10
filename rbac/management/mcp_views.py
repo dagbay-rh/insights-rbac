@@ -821,10 +821,10 @@ def _check_database() -> None:
 
 
 def _check_redis() -> None:
-    """Probe Redis connectivity via PING."""
+    """Probe Redis connectivity via PING. No-op when Redis is mocked."""
     conn = _get_redis()
     if conn is None:
-        raise RuntimeError("Redis is mocked (MOCK_REDIS=True)")
+        return
     conn.ping()
 
 

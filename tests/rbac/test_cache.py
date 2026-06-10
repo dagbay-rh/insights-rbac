@@ -479,13 +479,12 @@ class MockRedisTest(TestCase):
         # Should not raise — no Redis connection attempted
         cache.delete_tenant("mock_org")
 
-    def test_connection_property_raises_when_mock(self):
-        """Accessing connection raises RuntimeError when MOCK_REDIS=True."""
+    def test_connection_property_returns_none_when_mock(self):
+        """Accessing connection returns None when MOCK_REDIS=True."""
         from management.cache import BasicCache
 
         cache = BasicCache()
-        with self.assertRaises(RuntimeError):
-            _ = cache.connection
+        self.assertIsNone(cache.connection)
 
     def test_access_cache_delete_all_is_noop(self):
         """delete_all_policies_for_tenant is no-op when MOCK_REDIS=True."""
