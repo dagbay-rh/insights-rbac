@@ -6,47 +6,51 @@ from unittest import mock
 
 from django.test import SimpleTestCase
 
+from rbac.settings import _parse_logging_handlers
+
 
 class TestLoggingHandlerDeduplication(SimpleTestCase):
     """Verify that console+ecs handlers are deduplicated to prevent duplicate log lines."""
 
-    @staticmethod
-    def _get_logging_handlers(env_value):
-        """Simulate the LOGGING_HANDLERS computation from settings.py."""
-        handlers = env_value.split(",")
-        if "console" in handlers and "ecs" in handlers:
-            handlers = [h for h in handlers if h != "console"]
-        return handlers
-
     def test_console_only_unchanged(self):
         """DJANGO_LOG_HANDLERS=console should keep console."""
-        result = self._get_logging_handlers("console")
+        result = _parse_logging_handlers("console")
         self.assertEqual(result, ["console"])
 
     def test_ecs_only_unchanged(self):
         """DJANGO_LOG_HANDLERS=ecs should keep ecs."""
-        result = self._get_logging_handlers("ecs")
+        result = _parse_logging_handlers("ecs")
         self.assertEqual(result, ["ecs"])
 
     def test_console_and_ecs_deduplicates_to_ecs(self):
         """DJANGO_LOG_HANDLERS=console,ecs should drop console, keep ecs."""
-        result = self._get_logging_handlers("console,ecs")
+        result = _parse_logging_handlers("console,ecs")
         self.assertEqual(result, ["ecs"])
 
     def test_ecs_and_console_deduplicates_to_ecs(self):
         """DJANGO_LOG_HANDLERS=ecs,console should drop console, keep ecs."""
-        result = self._get_logging_handlers("ecs,console")
+        result = _parse_logging_handlers("ecs,console")
         self.assertEqual(result, ["ecs"])
 
     def test_console_ecs_watchtower_keeps_ecs_and_watchtower(self):
         """DJANGO_LOG_HANDLERS=console,ecs,watchtower should drop console only."""
-        result = self._get_logging_handlers("console,ecs,watchtower")
+        result = _parse_logging_handlers("console,ecs,watchtower")
         self.assertEqual(result, ["ecs", "watchtower"])
 
     def test_console_and_file_unchanged(self):
         """DJANGO_LOG_HANDLERS=console,file should keep both (no ecs conflict)."""
-        result = self._get_logging_handlers("console,file")
+        result = _parse_logging_handlers("console,file")
         self.assertEqual(result, ["console", "file"])
+
+    def test_whitespace_around_handler_names_stripped(self):
+        """DJANGO_LOG_HANDLERS='console, ecs' should strip whitespace and deduplicate."""
+        result = _parse_logging_handlers("console, ecs")
+        self.assertEqual(result, ["ecs"])
+
+    def test_whitespace_only_entries_dropped(self):
+        """Empty/whitespace-only entries from trailing commas are dropped."""
+        result = _parse_logging_handlers("console,,ecs, ")
+        self.assertEqual(result, ["ecs"])
 
     @mock.patch.dict(os.environ, {"DJANGO_LOG_HANDLERS": "console,ecs"})
     def test_settings_logging_config_uses_ecs_only(self):
