@@ -822,6 +822,31 @@ objects:
             cpu: ${RBAC_KAFKA_CONSUMER_CPU_REQUEST}
             memory: ${RBAC_KAFKA_CONSUMER_MEMORY_REQUEST}
 
+    - name: sql-exporter
+      minReplicas: ${{MIN_SQL_EXPORTER_REPLICAS}}
+      podSpec:
+        image: ${SQL_EXPORTER_IMAGE}
+        env:
+        - name: CONFIG
+          value: /etc/sql_exporter/config.yml
+        volumes:
+        - name: sql-exporter-config
+          configMap:
+            name: rbac-sql-exporter-config
+        volumeMounts:
+        - name: sql-exporter-config
+          mountPath: /etc/sql_exporter
+        resources:
+          requests:
+            cpu: ${SQL_EXPORTER_CPU_REQUEST}
+            memory: ${SQL_EXPORTER_MEMORY_REQUEST}
+          limits:
+            cpu: ${SQL_EXPORTER_CPU_LIMIT}
+            memory: ${SQL_EXPORTER_MEMORY_LIMIT}
+      webServices:
+        metrics:
+          enabled: true
+
     jobs:
       - name: user-id-populator
         podSpec:
@@ -1397,6 +1422,20 @@ objects:
       requests:
         storage: 2Gi
 
+- apiVersion: v1
+  kind: Service
+  metadata:
+    name: rbac-sql-exporter
+    labels:
+      app: rbac-sql-exporter
+  spec:
+    ports:
+    - name: 9399-tcp
+      port: 9399
+      targetPort: 9399
+    selector:
+      pod: rbac-sql-exporter
+    type: ClusterIP
 parameters:
 - description: Image name
   name: IMAGE
@@ -1857,3 +1896,21 @@ parameters:
 - name: PARITY_CHECK_PRINCIPAL_SAMPLE_SIZE
   description: Max principals per tenant
   value: '50'
+- name: MIN_SQL_EXPORTER_REPLICAS
+  description: Minimum replicas for sql-exporter
+  value: '1'
+- name: SQL_EXPORTER_IMAGE
+  description: SQL exporter image
+  value: quay.io/burningalchemist/sql_exporter:0.16.0
+- name: SQL_EXPORTER_CPU_REQUEST
+  description: SQL exporter CPU request
+  value: 50m
+- name: SQL_EXPORTER_MEMORY_REQUEST
+  description: SQL exporter memory request
+  value: 64Mi
+- name: SQL_EXPORTER_CPU_LIMIT
+  description: SQL exporter CPU limit
+  value: 100m
+- name: SQL_EXPORTER_MEMORY_LIMIT
+  description: SQL exporter memory limit
+  value: 128Mi
