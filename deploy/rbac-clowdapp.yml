@@ -822,7 +822,7 @@ objects:
             cpu: ${RBAC_KAFKA_CONSUMER_CPU_REQUEST}
             memory: ${RBAC_KAFKA_CONSUMER_MEMORY_REQUEST}
 
-    - name: postgres-exporter
+    - name: rbac-postgres-exporter
       minReplicas: ${{MIN_POSTGRES_EXPORTER_REPLICAS}}
       podSpec:
         image: ${POSTGRES_EXPORTER_IMAGE}
