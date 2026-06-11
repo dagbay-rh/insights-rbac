@@ -826,25 +826,44 @@ class RoleBindingKesselPermissionTests(RoleBindingAccessTestMixin, TransactionId
 
         self.assertFalse(result)
 
+    def _make_mock_request(self, admin=False, system=False, resource_id=None, resource_type=None):
+        """Create a mock request with common defaults for permission unit tests.
+
+        Args:
+            admin: Whether user is org admin (default: False).
+            system: Whether user is a system user (default: False).
+            resource_id: Optional resource_id query param.
+            resource_type: Optional resource_type query param.
+
+        Returns:
+            Mock request object. Set .tenant separately when needed.
+        """
+        mock_request = Mock()
+        mock_request.user.system = system
+        mock_request.user.admin = admin
+        query_params = {}
+        if resource_id is not None:
+            query_params["resource_id"] = str(resource_id)
+        if resource_type is not None:
+            query_params["resource_type"] = resource_type
+        mock_request.query_params = query_params
+        return mock_request
+
+    def _make_mock_view(self, action="by_subject"):
+        """Create a mock view with the specified action."""
+        mock_view = Mock()
+        mock_view.action = action
+        return mock_view
+
     def test_kessel_permission_rejects_invalid_uuid_resource_id(self):
         """Workspace resource_id must be a valid UUID; invalid values return 400."""
         from rest_framework.exceptions import ParseError
 
         permission = RoleBindingKesselAccessPermission()
-
-        mock_request = Mock()
-        mock_request.user.system = False
-        mock_request.user.admin = False
-        mock_request.query_params = {
-            "resource_id": "not-a-uuid",
-            "resource_type": "workspace",
-        }
-
-        mock_view = Mock()
-        mock_view.action = "by_subject"
+        mock_request = self._make_mock_request(resource_id="not-a-uuid", resource_type="workspace")
 
         with self.assertRaises(ParseError) as ctx:
-            permission.has_permission(mock_request, mock_view)
+            permission.has_permission(mock_request, self._make_mock_view())
 
         self.assertIn("not-a-uuid", str(ctx.exception.detail))
         self.assertIn("not a valid UUID", str(ctx.exception.detail))
@@ -852,21 +871,11 @@ class RoleBindingKesselPermissionTests(RoleBindingAccessTestMixin, TransactionId
     def test_kessel_permission_rejects_empty_string_resource_id(self):
         """Empty string resource_id is filtered out, falling back to tenant-level check."""
         permission = RoleBindingKesselAccessPermission()
-
-        mock_request = Mock()
-        mock_request.user.system = False
-        mock_request.user.admin = False
-        mock_request.query_params = {
-            "resource_id": "",
-            "resource_type": "workspace",
-        }
+        mock_request = self._make_mock_request(resource_id="", resource_type="workspace")
         mock_request.tenant = self.tenant
 
-        mock_view = Mock()
-        mock_view.action = "list"
-
         # Empty resource_id filtered by _parse_query_resource → tenant-level check → non-admin denied
-        result = permission.has_permission(mock_request, mock_view)
+        result = permission.has_permission(mock_request, self._make_mock_view(action="list"))
         self.assertFalse(result)
 
     def test_kessel_permission_rejects_numeric_string_resource_id(self):
@@ -874,170 +883,95 @@ class RoleBindingKesselPermissionTests(RoleBindingAccessTestMixin, TransactionId
         from rest_framework.exceptions import ParseError
 
         permission = RoleBindingKesselAccessPermission()
-
-        mock_request = Mock()
-        mock_request.user.system = False
-        mock_request.user.admin = False
-        mock_request.query_params = {
-            "resource_id": "12345",
-            "resource_type": "workspace",
-        }
-
-        mock_view = Mock()
-        mock_view.action = "list"
+        mock_request = self._make_mock_request(resource_id="12345", resource_type="workspace")
 
         with self.assertRaises(ParseError):
-            permission.has_permission(mock_request, mock_view)
+            permission.has_permission(mock_request, self._make_mock_view(action="list"))
 
     def test_kessel_permission_accepts_valid_uuid_resource_id(self):
         """Valid UUID resource_id for workspace should not raise ParseError."""
         import uuid
 
         permission = RoleBindingKesselAccessPermission()
-
-        mock_request = Mock()
-        mock_request.user.system = False
-        mock_request.user.admin = False
-        mock_request.query_params = {
-            "resource_id": str(uuid.uuid4()),
-            "resource_type": "workspace",
-        }
-
-        mock_view = Mock()
-        mock_view.action = "by_subject"
+        mock_request = self._make_mock_request(resource_id=str(uuid.uuid4()), resource_type="workspace")
 
         # Should not raise ParseError; will proceed to Kessel check (which may deny)
         with patch("management.permissions.role_binding_access.get_kessel_principal_id") as mock_principal:
             mock_principal.return_value = None
-            result = permission.has_permission(mock_request, mock_view)
+            result = permission.has_permission(mock_request, self._make_mock_view())
             # Denied because principal_id is None, but no ParseError raised
             self.assertFalse(result)
 
     def test_kessel_permission_allows_non_uuid_for_tenant_resource_type(self):
         """Tenant resource_type does not require UUID format for resource_id."""
         permission = RoleBindingKesselAccessPermission()
-
         tenant_resource_id = self.tenant.tenant_resource_id()
-        mock_request = Mock()
-        mock_request.user.system = False
-        mock_request.user.admin = True
-        mock_request.query_params = {
-            "resource_id": tenant_resource_id,
-            "resource_type": "tenant",
-        }
+        mock_request = self._make_mock_request(admin=True, resource_id=tenant_resource_id, resource_type="tenant")
         mock_request.tenant = self.tenant
 
-        mock_view = Mock()
-        mock_view.action = "by_subject"
-
         # Should not raise ParseError — tenant resource_id is not a UUID
-        result = permission.has_permission(mock_request, mock_view)
+        result = permission.has_permission(mock_request, self._make_mock_view())
         self.assertTrue(result)
 
     def test_list_without_resource_params_denied_for_non_admin(self):
         """List endpoint without resource params should deny non-admin users."""
         permission = RoleBindingKesselAccessPermission()
-
-        mock_request = Mock()
-        mock_request.user.system = False
-        mock_request.user.admin = False
-        mock_request.query_params = {}
+        mock_request = self._make_mock_request()
         mock_request.tenant = self.tenant
 
-        mock_view = Mock()
-        mock_view.action = "list"
-
-        result = permission.has_permission(mock_request, mock_view)
+        result = permission.has_permission(mock_request, self._make_mock_view(action="list"))
 
         self.assertFalse(result)
 
     def test_list_without_resource_params_allowed_for_org_admin(self):
         """List endpoint without resource params should allow org admin."""
         permission = RoleBindingKesselAccessPermission()
-
-        mock_request = Mock()
-        mock_request.user.system = False
-        mock_request.user.admin = True
-        mock_request.query_params = {}
+        mock_request = self._make_mock_request(admin=True)
         mock_request.tenant = self.tenant
 
-        mock_view = Mock()
-        mock_view.action = "list"
-
-        result = permission.has_permission(mock_request, mock_view)
+        result = permission.has_permission(mock_request, self._make_mock_view(action="list"))
 
         self.assertTrue(result)
 
     def test_by_subject_without_resource_params_denied_for_non_admin(self):
         """by_subject GET without resource params should deny non-admin users."""
         permission = RoleBindingKesselAccessPermission()
-
-        mock_request = Mock()
-        mock_request.method = "GET"
-        mock_request.user.system = False
-        mock_request.user.admin = False
-        mock_request.query_params = {}
+        mock_request = self._make_mock_request()
         mock_request.tenant = self.tenant
 
-        mock_view = Mock()
-        mock_view.action = "by_subject"
-
-        result = permission.has_permission(mock_request, mock_view)
+        result = permission.has_permission(mock_request, self._make_mock_view())
 
         self.assertFalse(result)
 
     def test_by_subject_without_resource_params_allowed_for_org_admin(self):
         """by_subject GET without resource params should allow org admin."""
         permission = RoleBindingKesselAccessPermission()
-
-        mock_request = Mock()
-        mock_request.method = "GET"
-        mock_request.user.system = False
-        mock_request.user.admin = True
-        mock_request.query_params = {}
+        mock_request = self._make_mock_request(admin=True)
         mock_request.tenant = self.tenant
 
-        mock_view = Mock()
-        mock_view.action = "by_subject"
-
-        result = permission.has_permission(mock_request, mock_view)
+        result = permission.has_permission(mock_request, self._make_mock_view())
 
         self.assertTrue(result)
 
     def test_list_without_resource_params_denied_when_no_tenant(self):
         """List without resource params should deny when no tenant on request."""
         permission = RoleBindingKesselAccessPermission()
-
-        mock_request = Mock()
-        mock_request.user.system = False
-        mock_request.user.admin = True
-        mock_request.query_params = {}
+        mock_request = self._make_mock_request(admin=True)
         mock_request.tenant = None
 
-        mock_view = Mock()
-        mock_view.action = "list"
-
-        result = permission.has_permission(mock_request, mock_view)
+        result = permission.has_permission(mock_request, self._make_mock_view(action="list"))
 
         self.assertFalse(result)
 
     def test_list_without_resource_params_denied_when_tenant_has_no_resource_id(self):
         """List without resource params should deny when tenant has no resource ID."""
         permission = RoleBindingKesselAccessPermission()
-
         mock_tenant = Mock()
         mock_tenant.tenant_resource_id.return_value = None
-
-        mock_request = Mock()
-        mock_request.user.system = False
-        mock_request.user.admin = True
-        mock_request.query_params = {}
+        mock_request = self._make_mock_request(admin=True)
         mock_request.tenant = mock_tenant
 
-        mock_view = Mock()
-        mock_view.action = "list"
-
-        result = permission.has_permission(mock_request, mock_view)
+        result = permission.has_permission(mock_request, self._make_mock_view(action="list"))
 
         self.assertFalse(result)
 

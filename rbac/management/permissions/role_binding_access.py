@@ -170,17 +170,18 @@ class RoleBindingKesselAccessPermission(permissions.BasePermission):
     def _check_tenant_read_permission(self, request):
         """Check read permission at tenant level when no resource params provided.
 
-        Non-admin users must provide resource_id/resource_type query parameters
-        to scope their request to a specific workspace.
+        When a read request (list, by_subject, etc.) omits resource_id/resource_type
+        query parameters, this method falls back to a tenant-level permission check.
+        Only users with org admin access on the tenant resource are allowed.
         """
         tenant = getattr(request, "tenant", None)
         if tenant is None:
-            logger.debug("Denied role binding list: no tenant on request")
+            logger.debug("Denied unscoped role binding read: no tenant on request")
             return False
 
         tenant_resource_id = tenant.tenant_resource_id()
         if not tenant_resource_id:
-            logger.debug("Denied role binding list: tenant has no resource ID")
+            logger.debug("Denied unscoped role binding read: tenant has no resource ID")
             return False
 
         return self._check_single_resource(request, "tenant", tenant_resource_id, self._get_read_relation())
