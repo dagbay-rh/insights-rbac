@@ -28,7 +28,7 @@ from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import connection, transaction
 from django.db.migrations.recorder import MigrationRecorder
-from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils.html import escape
 from django.views.decorators.http import require_http_methods
@@ -2088,6 +2088,8 @@ def check_role(request, role_uuid):
                 },
             }
         )
+    except Http404:
+        raise
     except RpcError as e:
         return JsonResponse(
             {"detail": "gRPC error occurred during inventory role relation check", "error": str(e)},
@@ -2162,6 +2164,8 @@ def check_cross_account_request(request, request_id):
                 },
             }
         )
+    except Http404:
+        raise
     except RpcError as e:
         return JsonResponse(
             {
