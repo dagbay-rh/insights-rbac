@@ -2100,15 +2100,19 @@ def check_role(request, role_uuid):
 
 
 def check_cross_account_request(request, request_id):
-    """POST to check an approved cross account request has correct relations on Inventory API.
+    """Check an approved cross account request has correct relations on Inventory API.
 
     Re-runs the CAR dual writer with an in-memory replicator to determine the expected
     relation tuples, then verifies each exists in the Inventory API.
+
+    The InMemoryRelationReplicator used here has no external side effects — it writes
+    only to an in-memory tuple store — so the transaction.atomic() + set_rollback(True)
+    block safely prevents any DB mutations without risk of non-transactional side effects.
     """
     try:
         car = get_object_or_404(CrossAccountRequest, request_id=request_id)
 
-        if car.status != "approved":
+        if car.status != CrossAccountRequest.STATUS_APPROVED:
             return JsonResponse(
                 {"detail": f"Cross account request {request_id} is not approved (status: {car.status})."},
                 status=400,
@@ -2166,11 +2170,11 @@ def check_cross_account_request(request, request_id):
             },
             status=400,
         )
-    except Exception as e:
+    except Exception:
+        logger.exception("Unexpected error during inventory cross account request check")
         return JsonResponse(
             {
                 "detail": "Unexpected error during inventory cross account request check",
-                "error": str(e),
             },
             status=500,
         )
