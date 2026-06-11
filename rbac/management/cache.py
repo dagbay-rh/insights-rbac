@@ -4,6 +4,7 @@ import contextlib
 import json
 import logging
 import pickle
+import threading
 
 from django.conf import settings
 from prometheus_client import Counter
@@ -13,6 +14,7 @@ from redis.client import Pipeline, Redis
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
 _connection_pool = None
+_connection_pool_lock = threading.Lock()
 
 
 def _is_mock_redis():
@@ -21,10 +23,12 @@ def _is_mock_redis():
 
 
 def _get_connection_pool():
-    """Lazily initialize the Redis connection pool."""
+    """Lazily initialize the Redis connection pool (thread-safe, double-checked locking)."""
     global _connection_pool
     if _connection_pool is None and not _is_mock_redis():
-        _connection_pool = BlockingConnectionPool(**settings.REDIS_CACHE_CONNECTION_PARAMS)
+        with _connection_pool_lock:
+            if _connection_pool is None:
+                _connection_pool = BlockingConnectionPool(**settings.REDIS_CACHE_CONNECTION_PARAMS)
     return _connection_pool
 
 
@@ -320,7 +324,7 @@ class JWTCacheOptimized(JWTCache):
 
     def get_jwt_response(self):
         """Get the JWT token response from Redis without health check overhead."""
-        if not self.use_caching:
+        if self._redis_mocked or not self.use_caching:
             return None
 
         try:
