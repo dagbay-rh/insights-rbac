@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 from kessel.inventory.v1beta2.check_response_pb2 import CheckResponse
 from management.inventory_checker.inventory_api_check import CrossAccountRequestInventoryChecker
-from management.relation_replicator.types import RelationTuple, Resource, ResourceType, Subject
+from management.relation_replicator.types import RelationTuple, ObjectReference, ObjectType, SubjectReference
 from tests.identity_request import IdentityRequest
 
 INVENTORY_STUB_PATH = (
@@ -28,13 +28,13 @@ INVENTORY_STUB_PATH = (
 )
 
 
-def _make_tuple(resource_type, resource_id, relation, subject_type, subject_id, subject_relation=""):
+def _make_tuple(resource_type, resource_id, relation, subject_type, subject_id, subject_relation=None):
     """Build a RelationTuple for testing."""
     return RelationTuple(
-        resource=Resource(type=ResourceType(namespace="rbac", name=resource_type), id=resource_id),
+        resource=ObjectReference(type=ObjectType(namespace="rbac", name=resource_type), id=resource_id),
         relation=relation,
-        subject=Subject(
-            subject=Resource(type=ResourceType(namespace="rbac", name=subject_type), id=subject_id),
+        subject=SubjectReference(
+            subject=ObjectReference(type=ObjectType(namespace="rbac", name=subject_type), id=subject_id),
             relation=subject_relation,
         ),
     )
