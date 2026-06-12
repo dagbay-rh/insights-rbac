@@ -28,6 +28,8 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from management.models import Workspace
+from rest_framework.exceptions import ParseError
+
 from management.permissions.role_binding_access import (
     RoleBindingKesselAccessPermission,
     RoleBindingSystemUserAccessPermission,
@@ -319,6 +321,101 @@ class RoleBindingAccessIntegrationTests(RoleBindingAccessTestMixin, TransactionI
 
 
 @override_settings(V2_APIS_ENABLED=True)
+class RoleBindingInvalidResourceTypeTests(RoleBindingAccessTestMixin, TransactionIdentityRequest):
+    """Integration tests for invalid resource_type returning 400."""
+
+    def test_invalid_resource_type_returns_400_on_by_subject(self):
+        """GET by_subject with invalid resource_type should return 400 with allowed values."""
+        request_context = self._create_request_context(self.customer_data, self.user_data, is_org_admin=False)
+        headers = request_context["request"].META
+
+        url = self._get_by_subject_url()
+        response = self.client.get(
+            f"{url}?resource_id={self.workspace.id}&resource_type=invalid",
+            **headers,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response_data = response.json()
+        self.assertIn("invalid", str(response_data))
+        self.assertIn("tenant", str(response_data))
+        self.assertIn("workspace", str(response_data))
+
+    def test_invalid_resource_type_returns_400_on_list(self):
+        """GET list with invalid resource_type should return 400 with allowed values."""
+        request_context = self._create_request_context(self.customer_data, self.user_data, is_org_admin=False)
+        headers = request_context["request"].META
+
+        url = self._get_list_url()
+        response = self.client.get(
+            f"{url}?resource_id={self.workspace.id}&resource_type=invalid",
+            **headers,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response_data = response.json()
+        self.assertIn("invalid", str(response_data))
+        self.assertIn("tenant", str(response_data))
+        self.assertIn("workspace", str(response_data))
+
+    def test_invalid_resource_type_returns_400_on_put_by_subject(self):
+        """PUT by_subject with invalid resource_type should return 400 with allowed values."""
+        url = self._get_by_subject_url()
+        response = self.client.put(
+            f"{url}?resource_id={self.workspace.id}&resource_type=invalid",
+            data={"requests": []},
+            content_type="application/json",
+            **self.headers,
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response_data = response.json()
+        self.assertIn("invalid", str(response_data))
+
+    def test_valid_resource_types_still_work(self):
+        """Ensure valid resource_type values (workspace, tenant) are not rejected."""
+        # Tenant resource type for org admin
+        tenant_resource_id = self.tenant.tenant_resource_id()
+        request_context = self._create_request_context(self.customer_data, self.user_data, is_org_admin=True)
+        headers = request_context["request"].META
+
+        url = self._get_by_subject_url()
+        response = self.client.get(
+            f"{url}?resource_id={tenant_resource_id}&resource_type=tenant",
+            **headers,
+        )
+
+        # Should NOT be 400 — tenant is a valid resource_type
+        self.assertNotEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_no_resource_params_passes_through(self):
+        """No resource params at all should pass through (no validation error)."""
+        request_context = self._create_request_context(self.customer_data, self.user_data, is_org_admin=False)
+        headers = request_context["request"].META
+
+        url = self._get_list_url()
+        response = self.client.get(url, **headers)
+
+        # No resource params — passes through without 400
+        self.assertNotEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_case_insensitive_resource_type(self):
+        """resource_type should be case-insensitive (normalized to lowercase)."""
+        request_context = self._create_request_context(self.customer_data, self.user_data, is_org_admin=True)
+        headers = request_context["request"].META
+
+        tenant_resource_id = self.tenant.tenant_resource_id()
+        url = self._get_by_subject_url()
+        response = self.client.get(
+            f"{url}?resource_id={tenant_resource_id}&resource_type=TENANT",
+            **headers,
+        )
+
+        # TENANT uppercased should be normalized to tenant — not 400
+        self.assertNotEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+@override_settings(V2_APIS_ENABLED=True)
 class RoleBindingSystemUserPermissionTests(RoleBindingAccessTestMixin, TransactionIdentityRequest):
     """Unit tests for RoleBindingSystemUserAccessPermission."""
 
@@ -524,8 +621,8 @@ class RoleBindingKesselPermissionTests(RoleBindingAccessTestMixin, TransactionId
 
     @patch("management.permissions.role_binding_access.get_kessel_principal_id")
     @patch("management.permissions.role_binding_access.WorkspaceInventoryAccessChecker")
-    def test_kessel_permission_denies_unknown_resource_type(self, mock_checker_class, mock_get_principal_id):
-        """Kessel permission should deny access for unknown resource types."""
+    def test_kessel_permission_raises_400_for_unknown_resource_type(self, mock_checker_class, mock_get_principal_id):
+        """Kessel permission should raise ParseError (400) for unknown resource types."""
         permission = RoleBindingKesselAccessPermission()
 
         mock_request = Mock()
@@ -539,10 +636,12 @@ class RoleBindingKesselPermissionTests(RoleBindingAccessTestMixin, TransactionId
         mock_view = Mock()
         mock_view.action = "by_subject"
 
-        result = permission.has_permission(mock_request, mock_view)
+        with self.assertRaises(ParseError) as ctx:
+            permission.has_permission(mock_request, mock_view)
 
-        # Should deny access without calling Kessel
-        self.assertFalse(result)
+        self.assertIn("unknown_resource", str(ctx.exception.detail))
+        self.assertIn("tenant", str(ctx.exception.detail))
+        self.assertIn("workspace", str(ctx.exception.detail))
         mock_get_principal_id.assert_not_called()
         mock_checker_class.assert_not_called()
 
@@ -1291,17 +1390,19 @@ class RoleBindingBatchCreatePermissionTests(RoleBindingAccessTestMixin, Transact
 
     @patch("management.permissions.role_binding_access.get_kessel_principal_id")
     @patch("management.permissions.role_binding_access.WorkspaceInventoryAccessChecker")
-    def test_batch_create_denied_for_unknown_resource_type(self, mock_checker_class, mock_get_principal_id):
-        """batch_create should deny for unknown resource types."""
+    def test_batch_create_raises_400_for_unknown_resource_type(self, mock_checker_class, mock_get_principal_id):
+        """batch_create should raise ParseError (400) for unknown resource types."""
         permission = RoleBindingKesselAccessPermission()
         mock_get_principal_id.return_value = "localhost/test-user-123"
 
         mock_request = self._make_batch_request([{"id": "some-id", "type": "unknown_type"}])
 
-        result = permission.has_permission(mock_request, self._make_batch_view())
+        with self.assertRaises(ParseError) as ctx:
+            permission.has_permission(mock_request, self._make_batch_view())
 
-        self.assertFalse(result)
-        # Principal is resolved eagerly, but Kessel checker is never called
+        self.assertIn("unknown_type", str(ctx.exception.detail))
+        self.assertIn("tenant", str(ctx.exception.detail))
+        self.assertIn("workspace", str(ctx.exception.detail))
         mock_checker_class.return_value.check_resource_access.assert_not_called()
 
     def test_batch_create_tenant_resource_requires_org_admin(self):
@@ -1511,15 +1612,18 @@ class RoleBindingBySubjectWritePermissionTests(RoleBindingAccessTestMixin, Trans
         self.assertEqual(mock_checker.check_resource_access.call_count, 2)
 
     @patch("management.permissions.role_binding_access.WorkspaceInventoryAccessChecker")
-    def test_put_by_subject_denied_when_unknown_resource_type(self, mock_checker_class):
-        """PUT by_subject should deny when resource_type is unknown and not call Kessel."""
+    def test_put_by_subject_raises_400_when_unknown_resource_type(self, mock_checker_class):
+        """PUT by_subject should raise ParseError (400) when resource_type is unknown."""
         permission = RoleBindingKesselAccessPermission()
 
         mock_request = self._make_put_request(self.workspace.id, "unknown_type")
 
-        result = permission.has_permission(mock_request, self._make_by_subject_put_view())
+        with self.assertRaises(ParseError) as ctx:
+            permission.has_permission(mock_request, self._make_by_subject_put_view())
 
-        self.assertFalse(result)
+        self.assertIn("unknown_type", str(ctx.exception.detail))
+        self.assertIn("tenant", str(ctx.exception.detail))
+        self.assertIn("workspace", str(ctx.exception.detail))
         mock_checker_class.assert_not_called()
 
     @patch("management.permissions.role_binding_access.WorkspaceInventoryAccessChecker")
