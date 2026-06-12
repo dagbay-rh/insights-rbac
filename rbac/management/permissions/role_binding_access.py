@@ -244,7 +244,7 @@ class RoleBindingKesselAccessPermission(permissions.BasePermission):
         if resource_type == "workspace":
             try:
                 uuid.UUID(str(resource_id))
-            except (ValueError, AttributeError):
+            except ValueError:
                 raise ParseError(detail=f"'{resource_id}' is not a valid UUID for resource_id.")
 
         if resource_type == "tenant":
