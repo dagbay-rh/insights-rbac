@@ -308,7 +308,9 @@ LOGGING = {
         "migration_tool": {"handlers": LOGGING_HANDLERS, "level": RBAC_LOGGING_LEVEL, "propagate": False},
         "feature_flags": {"handlers": DEBUG_LOG_HANDLERS, "level": "DEBUG", "propagate": False},
     },
-    "root": {"handlers": [], "level": "WARNING"},
+    # Attach default handlers to root so that loggers without explicit
+    # handlers still have a fallback output instead of silently dropping records.
+    "root": {"handlers": LOGGING_HANDLERS, "level": "WARNING"},
 }
 
 if CW_AWS_ACCESS_KEY_ID:
