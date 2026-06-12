@@ -1711,6 +1711,9 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
 
         The SDK handles pagination internally, so RBAC applies an item-count
         safety guard to prevent infinite iteration from buggy server responses.
+
+        This test also verifies that the underlying SDK iterator is *not* fully
+        consumed once the max-items limit is reached.
         """
         mock_stub = MagicMock()
         mock_channel.return_value.__enter__.return_value = MagicMock()
@@ -1726,13 +1729,18 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
             response.object.resource_id = f"ws-{index}"
             return response
 
-        # Create more responses than the limit
-        excess_count = test_max_items + 5
-        excess_responses = [make_response(i) for i in range(excess_count)]
+        # Build a guarded iterator that raises if consumed past max_items.
+        # This ensures the loop exits as soon as the limit is hit.
+        def guarded_iterator():
+            for i in range(test_max_items):
+                yield make_response(i)
+            raise AssertionError(
+                "lookup_accessible_workspaces over-consumed the SDK iterator past the max-items guard"
+            )
 
         with patch(
             "management.permissions.workspace_inventory_access.sdk_list_workspaces",
-            return_value=iter(excess_responses),
+            return_value=guarded_iterator(),
         ):
             with patch(
                 "kessel.inventory.v1beta2.inventory_service_pb2_grpc.KesselInventoryServiceStub",
@@ -2677,7 +2685,7 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
 
     @patch("management.inventory_client.create_client_channel_inventory")
     def test_lookup_accessible_workspaces_passes_consistency_token_to_request(self, mock_channel):
-        """Test that consistency_token parameter is used in the actual StreamedListObjects gRPC call."""
+        """Test that consistency_token parameter is passed through sdk_list_workspaces to the gRPC call."""
 
         mock_stub = MagicMock()
         mock_channel.return_value.__enter__.return_value = MagicMock()

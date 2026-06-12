@@ -193,8 +193,8 @@ class WorkspaceInventoryAccessChecker:
         Lookup which workspaces are accessible to the principal via SDK list_workspaces.
 
         Uses the Kessel SDK's list_workspaces() function which handles gRPC request construction
-        and continuation-token pagination internally. RBAC keeps safety guards (max items, duplicate
-        token detection) and timing instrumentation on top of the SDK call.
+        and continuation-token pagination internally. RBAC applies a max-items safety guard
+        and timing instrumentation on top of the SDK call.
 
         Args:
             principal_id: Principal identifier (e.g., "localhost/username")
