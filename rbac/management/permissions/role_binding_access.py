@@ -20,7 +20,6 @@
 import logging
 import uuid
 
-from django.core.exceptions import ValidationError
 from feature_flags import FEATURE_FLAGS
 from management.permissions.workspace_inventory_access import (
     WorkspaceInventoryAccessChecker,
@@ -242,14 +241,18 @@ class RoleBindingKesselAccessPermission(permissions.BasePermission):
             return
 
         try:
-            uuid.UUID(str(resource_id))
+            validated_uuid = uuid.UUID(str(resource_id))
         except (ValueError, AttributeError):
             # Not a valid UUID — skip existence check; Kessel will handle the error
             return
 
         try:
-            exists = Workspace.objects.filter(id=resource_id, tenant=tenant).exists()
-        except (ValueError, ValidationError, TypeError):
+            exists = Workspace.objects.filter(id=validated_uuid, tenant=tenant).exists()
+        except TypeError:
+            logger.exception(
+                "Error checking workspace existence for resource_id %s",
+                resource_id,
+            )
             return
 
         if not exists:
