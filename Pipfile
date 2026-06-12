@@ -42,7 +42,7 @@ redis = "==8.0.0"
 jsonschema = "*"
 unleashclient = "*"
 django-pgtransaction = "*"
-kessel-sdk = {extras = ["auth"], version = "*"}
+kessel-sdk = {extras = ["auth"], version = ">=2.7.0"}
 mcp = ">=1.26.0"
 
 [dev-packages]
