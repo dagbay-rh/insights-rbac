@@ -160,6 +160,109 @@ spec:
       workspaces:
       - name: basic-auth
         workspace: git-auth
+          # clone the repository for unit tests
+    - name: clone-repository-oci-ta
+      params:
+      - name: url
+        value: $(params.git-url)
+      - name: revision
+        value: $(params.revision)
+      - name: ociStorage
+        value: $(params.output-image).git
+      runAfter:
+      - init
+      taskRef:
+        params:
+        - name: name
+          value: git-clone-oci-ta
+        - name: bundle
+          value: quay.io/konflux-ci/tekton-catalog/task-git-clone-oci-ta:0.1@sha256:d30f13dd15daf89dd6dc645243b3444d35570d13f7840c3fd65e366022515205
+        - name: kind
+          value: task
+        resolver: bundles
+      workspaces:
+      - name: basic-auth
+        workspace: git-auth
+          # run the unit tests
+    - description: Running Insights RBAC unit tests
+      name: run-unit-tests
+      params:
+      - name: SOURCE_ARTIFACT
+        value: $(tasks.clone-repository-oci-ta.results.SOURCE_ARTIFACT)
+      - name: POSTGRESQL_USER
+        value: root
+      - name: POSTGRESQL_PASSWORD
+        value: root
+      - name: POSTGRESQL_DATABASE
+        value: rbac
+      - name: POSTGRESQL_PORT
+        value: "5432"
+      - name: DATABASE_HOST
+        value: 0.0.0.0
+      runAfter:
+      - clone-repository-oci-ta
+      taskSpec:
+        metadata: {}
+        params:
+        - description: The Trusted Artifact URI pointing to the artifact with the application source code.
+          name: SOURCE_ARTIFACT
+          type: string
+        sidecars:
+        - computeResources: {}
+          env:
+          - name: POSTGRESQL_DATABASE
+            value: $(params.POSTGRESQL_DATABASE)
+          - name: POSTGRESQL_USER
+            value: $(params.POSTGRESQL_USER)
+          - name: POSTGRESQL_PASSWORD
+            value: $(params.POSTGRESQL_PASSWORD)
+          - name: POSTGRESQL_PORT
+            value: $(params.POSTGRESQL_PORT)
+          image: quay.io/cloudservices/postgresql-rds:16
+          name: rbac-db
+        spec:
+        stepTemplate:
+          computeResources: {}
+          volumeMounts:
+          - mountPath: /var/workdir
+            name: workdir
+        steps:
+        - args:
+          - use
+          - $(params.SOURCE_ARTIFACT)=/var/workdir
+          computeResources: {}
+          image: quay.io/redhat-appstudio/build-trusted-artifacts:latest@sha256:9b180776a41d9a22a1c51539f1647c60defbbd55b44bbebdd4130e33512d8b0d
+          name: use-trusted-artifact
+        - computeResources: {}
+          env:
+          - name: DATABASE_NAME
+            value: $(params.POSTGRESQL_DATABASE)
+          - name: DATABASE_USER
+            value: $(params.POSTGRESQL_USER)
+          - name: DATABASE_PASSWORD
+            value: $(params.POSTGRESQL_PASSWORD)
+          - name: DATABASE_PORT
+            value: $(params.POSTGRESQL_PORT)
+          - name: DATABASE_HOST
+            value: $(params.DATABASE_HOST)
+          image: registry.access.redhat.com/ubi9/python-312:latest
+          name: unit-tests
+          script: |
+            #!/bin/bash
+            set -ex
+            echo "RUN THE UNIT TESTS"
+            pip install --upgrade pip
+            pip install tox
+            tox -r
+          securityContext:
+            runAsUser: 0
+          workingDir: /var/workdir
+        volumes:
+        - emptyDir: {}
+          name: workdir
+      workspaces:
+      - name: basic-auth
+        workspace: git-auth
     - name: prefetch-dependencies
       params:
       - name: input
