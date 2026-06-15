@@ -41,9 +41,10 @@ logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 class WorkspaceInventoryAccessChecker:
     """Check workspace access using Inventory API."""
 
-    # Page size for Inventory API StreamedListObjects requests with continuation token pagination.
+    # Used to calculate the max-items safety guard (PAGE_SIZE * MAX_PAGES).
+    # The SDK handles actual gRPC pagination internally with its own limit.
     PAGE_SIZE = 1000
-    # Maximum number of pages to fetch to prevent infinite loops from buggy server responses.
+    # Used with PAGE_SIZE to cap total items fetched, preventing runaway iteration.
     MAX_PAGES = 10000
 
     def _log_and_return_allowed(
