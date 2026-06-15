@@ -24,7 +24,7 @@ spec:
   - name: output-image
     value: quay.io/redhat-user-workloads/hcc-accessmanagement-tenant/insights-rbac:{{revision}}
   - name: dockerfile
-    value: ./
+    value: Dockerfile
   pipelineSpec:
     description: |
       This pipeline is ideal for building container images from a Containerfile while maintaining trust after pipeline customization.
