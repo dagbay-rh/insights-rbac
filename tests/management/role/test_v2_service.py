@@ -53,12 +53,12 @@ class RoleV2ServiceTests(IdentityRequest):
         super().setUp()
         self.service = RoleV2Service(tenant=self.tenant)
 
-        # Create test permissions
-        self.permission1 = Permission.objects.create(permission="inventory:hosts:read", tenant=self.tenant)
-        self.permission2 = Permission.objects.create(permission="inventory:hosts:write", tenant=self.tenant)
-        self.permission3 = Permission.objects.create(permission="cost:reports:read", tenant=self.tenant)
+        # Create test permissions (use unique names to avoid conflicts with seed_roles())
+        self.permission1 = Permission.objects.create(permission="test_app:test_resource:read", tenant=self.tenant)
+        self.permission2 = Permission.objects.create(permission="test_app:test_resource:write", tenant=self.tenant)
+        self.permission3 = Permission.objects.create(permission="test_app:reports:read", tenant=self.tenant)
 
-        self.permission1_data = {"application": "inventory", "resource_type": "hosts", "operation": "read"}
+        self.permission1_data = {"application": "test_app", "resource_type": "test_resource", "operation": "read"}
 
     def tearDown(self):
         """Tear down RoleV2Service tests."""
