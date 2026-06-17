@@ -841,19 +841,19 @@ objects:
           valueFrom:
             secretKeyRef:
               key: host
-              name: ${DB_SECRET_NAME}
+              name: db-clone
               optional: false
         - name: DATABASE_PORT
           valueFrom:
             secretKeyRef:
               key: port
-              name: ${DB_SECRET_NAME}
+              name: db-clone
               optional: false
         - name: DATABASE_NAME
           valueFrom:
             secretKeyRef:
               key: db
-              name: ${DB_SECRET_NAME}
+              name: db-clone
               optional: false
         - name: DATA_SOURCE_URI
           value: "$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)?sslmode=${PGSSLMODE}"
@@ -861,13 +861,13 @@ objects:
           valueFrom:
             secretKeyRef:
               key: user
-              name: ${DB_SECRET_NAME}
+              name: db-clone
               optional: false
         - name: DATA_SOURCE_PASS
           valueFrom:
             secretKeyRef:
               key: pass
-              name: ${DB_SECRET_NAME}
+              name: db-clone
               optional: false
         volumes:
         - name: postgres-exporter-queries
