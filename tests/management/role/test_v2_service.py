@@ -275,14 +275,10 @@ class RoleV2ServiceTests(IdentityRequest):
 
     def test_create_role_generates_uuid(self):
         """Test that creating a role auto-generates a UUID."""
-        permission_data = [
-            {"application": "inventory", "resource_type": "hosts", "operation": "read"},
-        ]
-
         role = self.service.create(
             name="UUID Test Role",
             description="Testing UUID generation",
-            permission_data=permission_data,
+            permission_data=[self.permission1_data],
             tenant=self.tenant,
         )
 
@@ -290,14 +286,10 @@ class RoleV2ServiceTests(IdentityRequest):
 
     def test_create_role_sets_type_to_custom(self):
         """Test that created roles are always of type CUSTOM."""
-        permission_data = [
-            {"application": "inventory", "resource_type": "hosts", "operation": "read"},
-        ]
-
         role = self.service.create(
             name="Custom Type Role",
             description="Should be custom",
-            permission_data=permission_data,
+            permission_data=[self.permission1_data],
             tenant=self.tenant,
         )
 
