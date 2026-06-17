@@ -873,6 +873,7 @@ objects:
         - name: postgres-exporter-queries
           configMap:
             name: rbac-postgres-exporter-queries
+            optional: true
         volumeMounts:
         - name: postgres-exporter-queries
           mountPath: /etc/config.yaml
