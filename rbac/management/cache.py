@@ -500,7 +500,7 @@ class WorkspaceCache(BasicCache):
         :param log_msg: Debug message logged on write.
         :param err_msg: Error message for logging on failure.
         """
-        if not settings.ACCESS_CACHE_ENABLED:
+        if not settings.ACCESS_CACHE_ENABLED or self._redis_mocked:
             return
         try:
             logger.debug(log_msg)

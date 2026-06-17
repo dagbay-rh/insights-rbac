@@ -92,6 +92,8 @@ class WorkspaceCacheClassTests(IdentityRequest):
     @patch.object(WorkspaceCache, "redis_health_check", return_value=True)
     def test_get_workspace_cache_hit(self, mock_health, mock_get_redis):
         """Cache hit returns workspace from get_cached."""
+        self.cache._redis_mocked = False
+        self.cache.use_caching = True
         mock_get_redis.return_value = self.root_workspace
 
         result = self.cache.get_workspace(self.tenant.org_id, "root")
@@ -103,6 +105,8 @@ class WorkspaceCacheClassTests(IdentityRequest):
     @patch.object(WorkspaceCache, "redis_health_check", return_value=True)
     def test_get_workspace_cache_miss(self, mock_health, mock_get_redis):
         """Cache miss returns None."""
+        self.cache._redis_mocked = False
+        self.cache.use_caching = True
         result = self.cache.get_workspace(self.tenant.org_id, "root")
         self.assertIsNone(result)
 
@@ -476,6 +480,8 @@ class WorkspaceCacheMetricsTests(IdentityRequest):
     @patch.object(WorkspaceCache, "redis_health_check", return_value=True)
     def test_get_workspace_miss_increments_metric(self, mock_health, mock_get_redis):
         """Cache miss on get_workspace increments model miss counter."""
+        self.cache._redis_mocked = False
+        self.cache.use_caching = True
         before = workspace_cache_total.labels(cache_layer="model", result="miss")._value.get()
         self.cache.get_workspace(self.tenant.org_id, "root")
         after = workspace_cache_total.labels(cache_layer="model", result="miss")._value.get()
@@ -485,6 +491,8 @@ class WorkspaceCacheMetricsTests(IdentityRequest):
     @patch.object(WorkspaceCache, "redis_health_check", return_value=True)
     def test_get_workspace_hit_increments_metric(self, mock_health, mock_get_redis):
         """Cache hit on get_workspace increments model hit counter."""
+        self.cache._redis_mocked = False
+        self.cache.use_caching = True
         mock_get_redis.return_value = self.root_workspace
         before = workspace_cache_total.labels(cache_layer="model", result="hit")._value.get()
         self.cache.get_workspace(self.tenant.org_id, "root")
