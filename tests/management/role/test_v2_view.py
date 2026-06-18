@@ -1303,12 +1303,12 @@ class RoleV2ViewSetTests(IdentityRequest):
 
     def test_create_role_preserves_permission_order(self):
         """Test that response permissions are returned in input order."""
-        # Request permissions in specific order (cost first, then inventory)
+        # Request permissions in specific order (reports first, then hosts)
         data = {
             "name": "Order Test Role",
             "description": "Testing permission order preservation",
             "permissions": [
-                {"application": "cost", "resource_type": "reports", "operation": "read"},
+                {"application": "testapp", "resource_type": "reports", "operation": "read"},
                 {"application": "testapp", "resource_type": "hosts", "operation": "write"},
                 {"application": "testapp", "resource_type": "hosts", "operation": "read"},
             ],
@@ -1322,7 +1322,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         self.assertEqual(
             response.data["permissions"],
             [
-                {"application": "cost", "resource_type": "reports", "operation": "read"},
+                {"application": "testapp", "resource_type": "reports", "operation": "read"},
                 {"application": "testapp", "resource_type": "hosts", "operation": "write"},
                 {"application": "testapp", "resource_type": "hosts", "operation": "read"},
             ],
