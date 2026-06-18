@@ -841,19 +841,19 @@ objects:
           valueFrom:
             secretKeyRef:
               key: host
-              name: ${DB_SECRET_NAME}
+              name: db-clone
               optional: false
         - name: DATABASE_PORT
           valueFrom:
             secretKeyRef:
               key: port
-              name: ${DB_SECRET_NAME}
+              name: db-clone
               optional: false
         - name: DATABASE_NAME
           valueFrom:
             secretKeyRef:
               key: db
-              name: ${DB_SECRET_NAME}
+              name: db-clone
               optional: false
         - name: DATA_SOURCE_URI
           value: "$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)?sslmode=${PGSSLMODE}"
@@ -861,18 +861,19 @@ objects:
           valueFrom:
             secretKeyRef:
               key: user
-              name: ${DB_SECRET_NAME}
+              name: db-clone
               optional: false
         - name: DATA_SOURCE_PASS
           valueFrom:
             secretKeyRef:
               key: pass
-              name: ${DB_SECRET_NAME}
+              name: db-clone
               optional: false
         volumes:
         - name: postgres-exporter-queries
           configMap:
             name: rbac-postgres-exporter-queries
+            optional: true
         volumeMounts:
         - name: postgres-exporter-queries
           mountPath: /etc/config.yaml
@@ -1946,7 +1947,7 @@ parameters:
   value: '50'
 - name: MIN_POSTGRES_EXPORTER_REPLICAS
   description: Minimum replicas for postgres-exporter
-  value: '1'
+  value: '0'
 - name: POSTGRES_EXPORTER_IMAGE
   description: Postgres exporter image
   value: quay.io/prometheuscommunity/postgres-exporter:v0.19.1
