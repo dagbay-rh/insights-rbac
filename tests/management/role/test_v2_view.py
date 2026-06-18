@@ -493,7 +493,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         self.permission3 = Permission.objects.create(permission="testapp:hosts:write", tenant=self.tenant)
         self.permission4 = Permission.objects.create(permission="testapp:reports:read", tenant=self.tenant)
 
-        self.permission1_data = {"application": "inventory", "resource_type": "hosts", "operation": "read"}
+        self.permission1_data = {"application": "testapp", "resource_type": "hosts", "operation": "read"}
 
         # Create a role for list tests
         self.role = RoleV2.objects.create(name="test_role", description="Test description", tenant=self.tenant)
@@ -1224,7 +1224,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Blocked Role",
             "description": "Should be blocked",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
         response = self.client.post(self.url, data, format="json")
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -1238,7 +1238,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "API Test Role",
             "description": "Created via API",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.post(self.url, data, format="json")
@@ -1250,7 +1250,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         # Verify permissions are returned in response
         self.assertEqual(
             response.data["permissions"],
-            [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         )
 
         self._assert_audit_log(action=AuditLog.CREATE, description=f"Created V2 role: {data['name']}")
@@ -1283,8 +1283,8 @@ class RoleV2ViewSetTests(IdentityRequest):
             "name": "Multi Permission API Role",
             "description": "Has multiple permissions",
             "permissions": [
-                {"application": "inventory", "resource_type": "hosts", "operation": "read"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
             ],
         }
 
@@ -1296,8 +1296,8 @@ class RoleV2ViewSetTests(IdentityRequest):
         self.assertCountEqual(
             response.data["permissions"],
             [
-                {"application": "inventory", "resource_type": "hosts", "operation": "read"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
             ],
         )
 
@@ -1309,8 +1309,8 @@ class RoleV2ViewSetTests(IdentityRequest):
             "description": "Testing permission order preservation",
             "permissions": [
                 {"application": "cost", "resource_type": "reports", "operation": "read"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "read"},
             ],
         }
 
@@ -1323,8 +1323,8 @@ class RoleV2ViewSetTests(IdentityRequest):
             response.data["permissions"],
             [
                 {"application": "cost", "resource_type": "reports", "operation": "read"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "read"},
             ],
         )
 
@@ -1332,7 +1332,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         """Test that missing name returns 400."""
         data = {
             "description": "No name",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.post(self.url, data, format="json")
@@ -1395,7 +1395,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Duplicate API Role",
             "description": "Second role",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.post(self.url, data, format="json")
@@ -1415,7 +1415,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "vulnerability viewer",
             "description": "Custom role with seeded name",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.post(self.url, data, format="json")
@@ -1439,7 +1439,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "PATCH VIEWER",
             "description": "Trying to rename to seeded name",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1500,7 +1500,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         """Test that creating a role without description returns 201 with empty description."""
         data = {
             "name": "No Description Role",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.post(self.url, data, format="json")
@@ -1515,7 +1515,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Response Format Role",
             "description": "Testing response format",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.post(self.url, data, format="json")
@@ -1532,7 +1532,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Fields Test Role",
             "description": "Testing fields parameter",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         url = f"{self.url}?fields=id,name,permissions_count"
@@ -1550,7 +1550,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Invalid Fields Role",
             "description": "Testing invalid fields",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         url = f"{self.url}?fields=id,nonexistent_field"
@@ -1567,7 +1567,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "role_*_admin",
             "description": "Should be rejected",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.post(self.url, data, format="json")
@@ -1613,7 +1613,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Updated Role",
             "description": "Updated description",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "write"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "write"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1626,7 +1626,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         # Verify permissions are updated in response
         self.assertEqual(
             response.data["permissions"],
-            [{"application": "inventory", "resource_type": "hosts", "operation": "write"}],
+            [{"application": "testapp", "resource_type": "hosts", "operation": "write"}],
         )
 
         self._assert_audit_log(
@@ -1670,7 +1670,7 @@ class RoleV2ViewSetTests(IdentityRequest):
             "name": "Test Role",
             "description": "Test description",
             "permissions": [
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
                 {"application": "cost", "resource_type": "reports", "operation": "read"},
             ],
         }
@@ -1701,8 +1701,8 @@ class RoleV2ViewSetTests(IdentityRequest):
             "description": "Testing permission order preservation",
             "permissions": [
                 {"application": "cost", "resource_type": "reports", "operation": "read"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "read"},
             ],
         }
 
@@ -1715,8 +1715,8 @@ class RoleV2ViewSetTests(IdentityRequest):
             response.data["permissions"],
             [
                 {"application": "cost", "resource_type": "reports", "operation": "read"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "read"},
             ],
         )
 
@@ -1726,7 +1726,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Updated Role",
             "description": "Updated description",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1755,7 +1755,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Role One",
             "description": "Second role",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1806,7 +1806,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         update_url = reverse("v2_management:roles-detail", kwargs={"uuid": str(role.uuid)})
         data = {
             "name": "Test Role",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1832,7 +1832,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Updated Response Format Role",
             "description": "Updated description",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1857,7 +1857,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Updated Fields Test Role",
             "description": "Updated description",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(url, data, format="json")
@@ -1881,7 +1881,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Default Fields Role",
             "description": "Test description",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1904,7 +1904,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Updated*Role",
             "description": "Should be rejected",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1929,7 +1929,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Attempt to Update Platform Role",
             "description": "This should fail",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1955,7 +1955,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Attempt to Update Seeded Role",
             "description": "This should fail with 400",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1980,7 +1980,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Updated Role",
             "description": "Updated description",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         error_cases = [
@@ -2014,7 +2014,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         # We omit the description here, which should be treated as an empty string.
         data = {
             "name": "Description Role",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -2035,7 +2035,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         # We omit the description here, which should be treated as an empty string.
         data = {
             "name": "A Better Role",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -2062,7 +2062,7 @@ class RoleV2ViewSetTests(IdentityRequest):
             {
                 "name": f"Test Role {str(uuid.uuid4())}",
                 "description": "A role for testing",
-                "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+                "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
             },
             format="json",
         )
