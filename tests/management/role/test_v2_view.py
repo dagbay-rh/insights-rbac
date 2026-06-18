@@ -86,17 +86,17 @@ class RoleV2RetrieveViewTest(IdentityRequest):
             )
         )
 
-        # Create permissions
+        # Create permissions (use test-namespaced names to avoid conflicts with seed_roles())
         self.permission1 = Permission.objects.create(
-            permission="inventory:hosts:read",
+            permission="testapp:hosts:read",
             tenant=self.tenant,
         )
         self.permission2 = Permission.objects.create(
-            permission="inventory:hosts:write",
+            permission="testapp:hosts:write",
             tenant=self.tenant,
         )
         self.permission3 = Permission.objects.create(
-            permission="cost:reports:read",
+            permission="testapp:reports:read",
             tenant=self.tenant,
         )
 
@@ -147,9 +147,9 @@ class RoleV2RetrieveViewTest(IdentityRequest):
         # Verify permissions
         self.assertEqual(len(data["permissions"]), 2)
         permission_strings = {f"{p['application']}:{p['resource_type']}:{p['operation']}" for p in data["permissions"]}
-        self.assertEqual(permission_strings, {"inventory:hosts:read", "inventory:hosts:write"})
+        self.assertEqual(permission_strings, {"testapp:hosts:read", "testapp:hosts:write"})
 
-    @override_settings(V2_MIGRATION_APP_EXCLUDE_LIST=["cost"])
+    @override_settings(V2_MIGRATION_APP_EXCLUDE_LIST=["testapp"])
     def test_retrieve_excluded_app_role_returns_404(self):
         """Test that retrieving a role whose permissions are all from an excluded app returns 404."""
         v2_role_excluded_application_permission_ids_cache.invalidate()
@@ -159,7 +159,7 @@ class RoleV2RetrieveViewTest(IdentityRequest):
                 description="Has only excluded-app permissions",
                 tenant=self.tenant,
             )
-            excluded_role.permissions.add(self.permission3)  # cost:reports:read
+            excluded_role.permissions.add(self.permission3)  # testapp:reports:read
 
             url = self._get_role_url(excluded_role.uuid)
             response = self.client.get(url, **self.headers)
@@ -238,9 +238,9 @@ class RoleV2RetrieveViewTest(IdentityRequest):
             self.assertIn("operation", permission)
 
             # Permission strings should be split correctly
-            # inventory:hosts:read -> application=inventory, resource_type=hosts, operation=read
-            if permission["application"] == "inventory":
-                self.assertEqual(permission["resource_type"], "hosts")
+            # testapp:hosts:read -> application=testapp, resource_type=hosts, operation=read
+            if permission["application"] == "testapp":
+                self.assertIn(permission["resource_type"], ["hosts", "reports"])
                 self.assertIn(permission["operation"], ["read", "write"])
 
     def test_retrieve_role_with_no_permissions(self):
@@ -316,10 +316,10 @@ class RoleV2RetrieveViewTest(IdentityRequest):
             tenant=self.tenant,
         )
         # Add permissions in non-alphabetical order
-        # Expected alphabetical order: cost:reports:read, inventory:hosts:read, inventory:hosts:write
-        ordered_role.permissions.add(self.permission2)  # inventory:hosts:write
-        ordered_role.permissions.add(self.permission3)  # cost:reports:read
-        ordered_role.permissions.add(self.permission1)  # inventory:hosts:read
+        # Expected alphabetical order: testapp:hosts:read, testapp:hosts:write, testapp:reports:read
+        ordered_role.permissions.add(self.permission2)  # testapp:hosts:write
+        ordered_role.permissions.add(self.permission3)  # testapp:reports:read
+        ordered_role.permissions.add(self.permission1)  # testapp:hosts:read
 
         url = self._get_role_url(ordered_role.uuid)
         response = self.client.get(url, **self.headers)
@@ -329,7 +329,7 @@ class RoleV2RetrieveViewTest(IdentityRequest):
 
         # Verify permissions are sorted alphabetically
         permission_strings = [f"{p['application']}:{p['resource_type']}:{p['operation']}" for p in data["permissions"]]
-        self.assertEqual(permission_strings, ["cost:reports:read", "inventory:hosts:read", "inventory:hosts:write"])
+        self.assertEqual(permission_strings, ["testapp:hosts:read", "testapp:hosts:write", "testapp:reports:read"])
 
         ordered_role.delete()
 
@@ -417,9 +417,9 @@ class RoleV2RetrieveViewTest(IdentityRequest):
             "name": "Consistency Test Role",
             "description": "Testing create/retrieve consistency",
             "permissions": [
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
-                {"application": "cost", "resource_type": "reports", "operation": "read"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "reports", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "read"},
             ],
         }
 
@@ -434,7 +434,7 @@ class RoleV2RetrieveViewTest(IdentityRequest):
         create_permissions = [
             f"{p['application']}:{p['resource_type']}:{p['operation']}" for p in create_response.data["permissions"]
         ]
-        self.assertEqual(create_permissions, ["inventory:hosts:write", "cost:reports:read", "inventory:hosts:read"])
+        self.assertEqual(create_permissions, ["testapp:hosts:write", "testapp:reports:read", "testapp:hosts:read"])
 
         # Retrieve the same role
         retrieve_url = reverse("v2_management:roles-detail", kwargs={"uuid": role_id})
@@ -445,7 +445,7 @@ class RoleV2RetrieveViewTest(IdentityRequest):
         retrieve_permissions = [
             f"{p['application']}:{p['resource_type']}:{p['operation']}" for p in retrieve_response.data["permissions"]
         ]
-        self.assertEqual(retrieve_permissions, ["cost:reports:read", "inventory:hosts:read", "inventory:hosts:write"])
+        self.assertEqual(retrieve_permissions, ["testapp:hosts:read", "testapp:hosts:write", "testapp:reports:read"])
 
         # Both should have same permission set, just different order
         self.assertEqual(set(create_permissions), set(retrieve_permissions))
@@ -487,11 +487,11 @@ class RoleV2ViewSetTests(IdentityRequest):
         self.list_url = f"{self.url}?resource_type=workspace"
         self.delete_url = reverse("v2_management:roles-bulk-destroy")
 
-        # Create test permissions
+        # Create test permissions (use test-namespaced names to avoid conflicts with seed_roles())
         self.permission1 = Permission.objects.create(permission="test:resource:read", tenant=self.tenant)
-        self.permission2 = Permission.objects.create(permission="inventory:hosts:read", tenant=self.tenant)
-        self.permission3 = Permission.objects.create(permission="inventory:hosts:write", tenant=self.tenant)
-        self.permission4 = Permission.objects.create(permission="cost:reports:read", tenant=self.tenant)
+        self.permission2 = Permission.objects.create(permission="testapp:hosts:read", tenant=self.tenant)
+        self.permission3 = Permission.objects.create(permission="testapp:hosts:write", tenant=self.tenant)
+        self.permission4 = Permission.objects.create(permission="testapp:reports:read", tenant=self.tenant)
 
         self.permission1_data = {"application": "inventory", "resource_type": "hosts", "operation": "read"}
 
@@ -843,7 +843,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         role_without_perm = RoleV2.objects.create(name="no_match_role", tenant=self.tenant)
         role_without_perm.permissions.add(self.permission4)
 
-        url = f"{self.list_url}&permission=inventory:hosts:read"
+        url = f"{self.list_url}&permission=testapp:hosts:read"
         response = self.client.get(url, **self.headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -859,7 +859,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         role_b = RoleV2.objects.create(name="cost_reader", tenant=self.tenant)
         role_b.permissions.add(self.permission4)
 
-        url = f"{self.list_url}&permission=inventory:hosts:read,cost:reports:read"
+        url = f"{self.list_url}&permission=testapp:hosts:read,testapp:reports:read"
         response = self.client.get(url, **self.headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -880,7 +880,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         role = RoleV2.objects.create(name="multi_perm_role", tenant=self.tenant)
         role.permissions.add(self.permission2, self.permission3)
 
-        url = f"{self.list_url}&permission=inventory:hosts:read,inventory:hosts:write"
+        url = f"{self.list_url}&permission=testapp:hosts:read,testapp:hosts:write"
         response = self.client.get(url, **self.headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
