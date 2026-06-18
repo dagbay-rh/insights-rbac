@@ -195,11 +195,12 @@ class RoleV2ServiceTests(IdentityRequest):
 
     def test_create_role_with_duplicate_name_raises_error(self):
         """Test that creating a role with a duplicate name raises RoleAlreadyExistsError."""
+        # Uses permissions created in setUp: inventory:hosts:read and inventory:hosts:write
         permission_data1 = [
-            {"application": "test_app", "resource_type": "test_resource", "operation": "read"},
+            {"application": "inventory", "resource_type": "hosts", "operation": "read"},
         ]
         permission_data2 = [
-            {"application": "test_app", "resource_type": "test_resource", "operation": "write"},
+            {"application": "inventory", "resource_type": "hosts", "operation": "write"},
         ]
 
         # Create first role
@@ -302,6 +303,10 @@ class RoleV2ServiceTests(IdentityRequest):
     @override_settings(REPLICATION_TO_RELATION_ENABLED=True)
     def test_create_role_replicates_permission_tuples(self):
         """Test that creating a role replicates permission tuples to SpiceDB."""
+        # Create test permissions for this test
+        Permission.objects.create(permission="test_app:test_resource:read", tenant=self.tenant)
+        Permission.objects.create(permission="test_app:test_resource:write", tenant=self.tenant)
+
         # Set up in-memory replicator (stub, not mock!)
         tuples = InMemoryTuples()
         replicator = InMemoryRelationReplicator(tuples)
