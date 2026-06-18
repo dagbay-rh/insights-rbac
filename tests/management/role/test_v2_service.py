@@ -308,8 +308,8 @@ class RoleV2ServiceTests(IdentityRequest):
         service = RoleV2Service(tenant=self.tenant, replicator=replicator)
 
         permission_data = [
-            {"application": "inventory", "resource_type": "hosts", "operation": "read"},
-            {"application": "inventory", "resource_type": "hosts", "operation": "write"},
+            {"application": "test_app", "resource_type": "test_resource", "operation": "read"},
+            {"application": "test_app", "resource_type": "test_resource", "operation": "write"},
         ]
 
         # When: Create a role
@@ -330,7 +330,7 @@ class RoleV2ServiceTests(IdentityRequest):
         read_tuples = tuples.find_tuples(
             all_of(
                 resource("rbac", "role", role_uuid),
-                relation("inventory_hosts_read"),
+                relation("test_app_test_resource_read"),
                 subject("rbac", "principal", "*"),
             )
         )
@@ -340,7 +340,7 @@ class RoleV2ServiceTests(IdentityRequest):
         write_tuples = tuples.find_tuples(
             all_of(
                 resource("rbac", "role", role_uuid),
-                relation("inventory_hosts_write"),
+                relation("test_app_test_resource_write"),
                 subject("rbac", "principal", "*"),
             )
         )
