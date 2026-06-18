@@ -196,10 +196,10 @@ class RoleV2ServiceTests(IdentityRequest):
     def test_create_role_with_duplicate_name_raises_error(self):
         """Test that creating a role with a duplicate name raises RoleAlreadyExistsError."""
         permission_data1 = [
-            {"application": "inventory", "resource_type": "hosts", "operation": "read"},
+            {"application": "test_app", "resource_type": "test_resource", "operation": "read"},
         ]
         permission_data2 = [
-            {"application": "inventory", "resource_type": "hosts", "operation": "write"},
+            {"application": "test_app", "resource_type": "test_resource", "operation": "write"},
         ]
 
         # Create first role
