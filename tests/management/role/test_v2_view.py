@@ -1673,7 +1673,7 @@ class RoleV2ViewSetTests(IdentityRequest):
             "description": "Test description",
             "permissions": [
                 {"application": "testapp", "resource_type": "hosts", "operation": "write"},
-                {"application": "cost", "resource_type": "reports", "operation": "read"},
+                {"application": "testapp", "resource_type": "reports", "operation": "read"},
             ],
         }
 
@@ -1702,7 +1702,7 @@ class RoleV2ViewSetTests(IdentityRequest):
             "name": "Order Test Role",
             "description": "Testing permission order preservation",
             "permissions": [
-                {"application": "cost", "resource_type": "reports", "operation": "read"},
+                {"application": "testapp", "resource_type": "reports", "operation": "read"},
                 {"application": "testapp", "resource_type": "hosts", "operation": "write"},
                 {"application": "testapp", "resource_type": "hosts", "operation": "read"},
             ],
@@ -1716,7 +1716,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         self.assertEqual(
             response.data["permissions"],
             [
-                {"application": "cost", "resource_type": "reports", "operation": "read"},
+                {"application": "testapp", "resource_type": "reports", "operation": "read"},
                 {"application": "testapp", "resource_type": "hosts", "operation": "write"},
                 {"application": "testapp", "resource_type": "hosts", "operation": "read"},
             ],
