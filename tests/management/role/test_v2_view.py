@@ -1581,6 +1581,8 @@ class RoleV2ViewSetTests(IdentityRequest):
     @override_settings(V2_MIGRATION_APP_EXCLUDE_LIST=["cost"])
     def test_create_role_rejects_migration_excluded_application(self):
         """Permissions in V2_MIGRATION_APP_EXCLUDE_LIST cannot be used on create."""
+        # Ensure the permission exists so it can be excluded by the setting
+        Permission.objects.get_or_create(permission="cost:reports:read", defaults={"tenant": self.tenant})
         v2_role_excluded_application_permission_ids_cache.invalidate()
         try:
             data = {
