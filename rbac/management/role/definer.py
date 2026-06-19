@@ -428,6 +428,7 @@ def _update_or_create_roles(roles, config: _SeedRolesConfig, platform_roles=None
             current_role_ids.add(role.id)
         except Exception as e:
             logger.error(f'Failed to update or create system role: {role_json.get("name")} with error: {e}')
+            raise
     return current_role_ids
 
 
@@ -594,7 +595,11 @@ def _create_single_platform_role(access_type, scope, policy_service, public_tena
 
 
 def _seed_v2_role_from_v1(v1_role, display_name, description, public_tenant, platform_roles, resource_service):
-    """Create or update V2 role from V1 role during seeding."""
+    """Create or update V2 role from V1 role during seeding.
+
+    Raises on failure so the caller's transaction rolls back, ensuring V1 and V2 roles
+    are created/updated atomically.
+    """
     try:
         # Check what scopes this role is bound at in V1 tenants to detect scope changes
         # IMPORTANT: Check old scopes BEFORE updating the role or clearing permissions
@@ -647,7 +652,7 @@ def _seed_v2_role_from_v1(v1_role, display_name, description, public_tenant, pla
         return v2_role
     except Exception:
         logger.error("Failed to seed V2 role for %s", display_name, exc_info=True)
-        return None
+        raise
 
 
 def _seed_platform_roles():
