@@ -27,7 +27,6 @@ ORG_ID_SCOPE = "org_id"
 PRINCIPAL_SCOPE = "principal"
 
 KESSEL_READ_RELATION = "rbac_roles_read"
-KESSEL_WRITE_RELATION = "rbac_roles_write"
 
 
 def is_scope_principal(request):
