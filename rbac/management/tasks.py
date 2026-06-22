@@ -574,8 +574,8 @@ def recover_workspace_events_in_worker(
     Returns:
         dict: Summary statistics of corrective events generated.
     """
-    if not getattr(settings, "DR_WORKSPACE_RECOVERY_ENABLED", False):
-        return {"message": "DR recovery disabled (DR_WORKSPACE_RECOVERY_ENABLED=False)"}
+    if not getattr(settings, "DR_WORKSPACE_RECONCILE_ENABLED", False):
+        return {"message": "DR recovery disabled (DR_WORKSPACE_RECONCILE_ENABLED=False)"}
 
     from django.core.cache import cache
 

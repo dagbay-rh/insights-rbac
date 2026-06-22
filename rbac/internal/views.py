@@ -2729,8 +2729,8 @@ def recover_workspace_events(request: HttpRequest) -> JsonResponse:
 
     Returns 202 with task_id on success.
     """
-    if not getattr(settings, "DR_WORKSPACE_RECOVERY_ENABLED", False):
-        return JsonResponse({"detail": "DR recovery is disabled (DR_WORKSPACE_RECOVERY_ENABLED=False)"}, status=403)
+    if not getattr(settings, "DR_WORKSPACE_RECONCILE_ENABLED", False):
+        return JsonResponse({"detail": "DR recovery is disabled (DR_WORKSPACE_RECONCILE_ENABLED=False)"}, status=403)
 
     try:
         body = load_request_body(request)
