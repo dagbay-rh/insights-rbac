@@ -39,8 +39,6 @@ from api.models import Tenant
 
 _SUBJECT_TYPE_GROUP = "group"
 _SUBJECT_TYPE_USER = "user"
-_GROUP_FIELD_PREFIX = "group."
-
 # ── Shared subject-building helper ──────────────────────────────────
 
 
@@ -957,25 +955,6 @@ class RoleBindingFieldMaskingMixin:
                 resource_data[field_name] = value
 
         return resource_data
-
-    @staticmethod
-    def _extract_nested_fields(prefix, field_paths, obj):
-        """Extract attribute values matching field paths with a given prefix.
-
-        Handles the ``user_count`` → ``principalCount`` special case for groups.
-        """
-        details = {}
-        prefix_len = len(prefix)
-        for field_path in field_paths:
-            if field_path.startswith(prefix):
-                attr_name = field_path[prefix_len:]
-                if attr_name == "user_count":
-                    details[attr_name] = getattr(obj, "principalCount", 0)
-                else:
-                    value = getattr(obj, attr_name, None)
-                    if value is not None:
-                        details[attr_name] = value
-        return details
 
 
 class BatchCreateRoleBindingResponseItemSerializer(RoleBindingFieldMaskingMixin, serializers.Serializer):
