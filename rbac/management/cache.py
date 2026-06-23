@@ -479,7 +479,7 @@ class WorkspaceCache(BasicCache):
         :param err_msg: Error message for logging on failure.
         :returns: The deserialized data or None.
         """
-        if not settings.ACCESS_CACHE_ENABLED:
+        if not settings.ACCESS_CACHE_ENABLED or self._redis_mocked:
             return None
         try:
             if not self.redis_health_check():
@@ -518,6 +518,8 @@ class WorkspaceCache(BasicCache):
         :param cache_key: The cache key suffix (e.g. workspace type or workspace id).
         :returns: The cached response data (dict) or None.
         """
+        if not settings.ACCESS_CACHE_ENABLED:
+            return None
         result = self._get_json(
             self.response_key_for(org_id, cache_key),
             err_msg=f"Error fetching workspace response cache for org {org_id}",

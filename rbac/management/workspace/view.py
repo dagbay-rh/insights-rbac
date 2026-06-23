@@ -262,7 +262,7 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
 
         response = super().retrieve(request, *args, **kwargs)
 
-        if org_id and response.status_code == 200:
+        if org_id and pk and response.status_code == 200:
             ws_type = response.data.get("type")
             if ws_type in (Workspace.Types.ROOT, Workspace.Types.DEFAULT):
                 _set_cached_response(org_id, _workspace_retrieve_cache_key(pk, include_ancestry), response.data)
@@ -363,7 +363,12 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
         self._log_audit(self.request, AuditLog.DELETE, instance, f"Deleted workspace: {instance.name}")
 
     def perform_update(self, serializer):
-        """Update workspace and log audit entry."""
+        """Update workspace and log audit entry.
+
+        Invalidates workspace cache for built-in types (default) to prevent
+        serving stale data. ROOT workspaces are blocked at the service layer,
+        but we guard both types defensively.
+        """
         instance = serializer.instance
         audit_log = AuditLog()
         description = audit_log.find_edited_field(
@@ -371,6 +376,11 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
         )
         super().perform_update(serializer)
         self._log_audit(self.request, AuditLog.EDIT, instance, description)
+
+        if instance.type in (Workspace.Types.ROOT, Workspace.Types.DEFAULT):
+            org_id = self._get_org_id(self.request)
+            if org_id:
+                WORKSPACE_CACHE.delete_workspaces_for_tenant(org_id)
 
     @transaction.atomic()
     def update(self, request, *args, **kwargs):

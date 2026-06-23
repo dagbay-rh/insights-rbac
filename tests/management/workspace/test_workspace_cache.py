@@ -114,6 +114,7 @@ class WorkspaceCacheClassTests(IdentityRequest):
         """Response cache hit returns JSON data."""
         import json
 
+        self.cache._redis_mocked = False
         test_data = {"meta": {"count": 1}, "data": [{"id": "test"}]}
         mock_conn = MagicMock()
         mock_conn.get.return_value = json.dumps(test_data).encode()
@@ -125,6 +126,7 @@ class WorkspaceCacheClassTests(IdentityRequest):
 
     def test_get_response_cache_miss(self):
         """Response cache miss returns None."""
+        self.cache._redis_mocked = False
         mock_conn = MagicMock()
         mock_conn.get.return_value = None
 
@@ -142,12 +144,14 @@ class WorkspaceCacheClassTests(IdentityRequest):
     @patch.object(WorkspaceCache, "redis_health_check", return_value=False)
     def test_get_response_redis_down(self, mock_health):
         """Returns None when Redis is unreachable."""
+        self.cache._redis_mocked = False
         result = self.cache.get_response(self.tenant.org_id, "list::root")
         self.assertIsNone(result)
 
     @patch.object(WorkspaceCache, "redis_health_check", side_effect=redis_exceptions.RedisError("connection failed"))
     def test_get_response_redis_error(self, mock_health):
         """Returns None on Redis error."""
+        self.cache._redis_mocked = False
         result = self.cache.get_response(self.tenant.org_id, "list::root")
         self.assertIsNone(result)
 
@@ -501,6 +505,7 @@ class WorkspaceCacheMetricsTests(IdentityRequest):
 
     def test_get_response_miss_increments_metric(self):
         """Cache miss on get_response increments response miss counter."""
+        self.cache._redis_mocked = False
         mock_conn = MagicMock()
         mock_conn.get.return_value = None
 
@@ -515,6 +520,7 @@ class WorkspaceCacheMetricsTests(IdentityRequest):
         """Cache hit on get_response increments response hit counter."""
         import json
 
+        self.cache._redis_mocked = False
         test_data = {"meta": {"count": 1}, "data": [{"id": "test"}]}
         mock_conn = MagicMock()
         mock_conn.get.return_value = json.dumps(test_data).encode()
