@@ -235,7 +235,7 @@ PARITY_STEP=cleanup ./scripts/ephemeral/rbac-parity-toolkit.sh --check
 | `PARITY_FAST` | `false` | Skip waits and auto-confirm |
 | `PARITY_MINIMAL` | `false` | Minimal test data (1 of each resource) |
 
-## DR Toolkit State File
+## State File
 
 The toolkit persists state between phases in `~/.cache/rbac-dr-state.env` (plain key=value format). This allows running phases independently:
 

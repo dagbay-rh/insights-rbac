@@ -31,14 +31,17 @@ set -euo pipefail
 
 EPHEMERAL_NAMESPACE=$(oc project -q 2>/dev/null || true)
 BENTO_BASIC_AUTH_CONSOLE_DOT_USERNAME=jdoe
+EPHEMERAL_PASSWORD=$(oc get secret "env-${EPHEMERAL_NAMESPACE:-none}-keycloak" -o json 2>/dev/null \
+  | jq -r '.data.defaultPassword // empty' | base64 -d 2>/dev/null || true)
 EPHEMERAL_HOST_NAME=$(oc get frontendenvironment "env-${EPHEMERAL_NAMESPACE:-none}" -o json 2>/dev/null \
   | jq -r '.spec.hostname // empty' 2>/dev/null || true)
+BENTO_URL=https://${EPHEMERAL_HOST_NAME}
 
 # ── Config (overridable via env) ──────────────────────────────────────────────
 
 RBAC_SERVICE_POD_LABEL="${RBAC_SERVICE_POD_LABEL:-pod=rbac-service}"
 RBAC_WORKER_POD_LABEL="${RBAC_WORKER_POD_LABEL:-pod=rbac-worker-service}"
-RBAC_DB_POD_LABEL="${RBAC_DB_POD_LABEL:-pod=rbac-db}"
+RBAC_DB_POD_LABEL="${RBAC_DB_POD_LABEL:-app=rbac,service=db}"
 
 PARITY_ORG_ID="${PARITY_ORG_ID:-}"
 PARITY_FAST="${PARITY_FAST:-false}"
@@ -74,6 +77,10 @@ state_save() {
 
 state_load() {
   if [[ -f "${PARITY_STATE_FILE}" ]]; then
+    if grep -qvE '^[A-Z_]+=.*$|^$' "${PARITY_STATE_FILE}" 2>/dev/null; then
+      err "State file contains invalid entries -- refusing to load: ${PARITY_STATE_FILE}"
+      return 1
+    fi
     # shellcheck disable=SC1090
     source "${PARITY_STATE_FILE}"
   fi
@@ -189,6 +196,12 @@ _db_creds() {
 _db_query() {
   PGPASSWORD="${_db_password}" oc exec "${_db_pod}" -- \
     psql -U "${_db_user}" -d "${_db_name}" -t -A -c "$1" 2>/dev/null | tr -d '\r'
+}
+
+_db_query_parameterized() {
+  local var_binding="$1" sql="$2"
+  PGPASSWORD="${_db_password}" oc exec "${_db_pod}" -- \
+    psql -U "${_db_user}" -d "${_db_name}" -v "${var_binding}" -t -A -c "${sql}" 2>/dev/null | tr -d '\r'
 }
 
 # ── Internal API helper ──────────────────────────────────────────────────────
@@ -615,8 +628,8 @@ phase_break() {
 
   # First remove any role bindings referencing this workspace.
   local rb_deleted
-  rb_deleted=$(_db_query "DELETE FROM management_rolebinding
-    WHERE resource_id = '${target_ws_id}'
+  rb_deleted=$(_db_query_parameterized "ws_id=${target_ws_id}" "DELETE FROM management_rolebinding
+    WHERE resource_id = :'ws_id'
     RETURNING uuid;")
   if [[ -n "${rb_deleted}" ]]; then
     info "  Removed role bindings referencing workspace: ${rb_deleted}"
@@ -624,8 +637,8 @@ phase_break() {
 
   # Delete the workspace itself.
   local ws_deleted
-  ws_deleted=$(_db_query "DELETE FROM management_workspace
-    WHERE id = '${target_ws_id}'
+  ws_deleted=$(_db_query_parameterized "ws_id=${target_ws_id}" "DELETE FROM management_workspace
+    WHERE id = :'ws_id'
     RETURNING id, name;")
 
   if [[ -n "${ws_deleted}" ]]; then
