@@ -2766,7 +2766,7 @@ class InternalViewsetUserLookupTests(BaseInternalViewsetTests):
     def test_user_lookup_creates_audit_log_on_success(self, _):
         username = "test_user"
         tenant = Tenant.objects.create(tenant_name="test_tenant", org_id="12345")
-        Principal.objects.create(username=username, tenant=tenant)
+        principal = Principal.objects.create(username=username, tenant=tenant)
 
         self.client.get(f"{self.API_PATH}?username={username}", **self.request.META)
 
@@ -2776,7 +2776,8 @@ class InternalViewsetUserLookupTests(BaseInternalViewsetTests):
         self.assertTrue(log.principal_username)
         self.assertIn("found 'test_user'", log.description)
         self.assertIn("username='test_user'", log.description)
-        self.assertEqual(log.tenant, tenant)
+        self.assertIsNone(log.tenant)
+        self.assertEqual(log.resource_uuid, principal.uuid)
 
     @patch(
         "management.principal.proxy.PrincipalProxy.request_filtered_principals",
@@ -2798,6 +2799,33 @@ class InternalViewsetUserLookupTests(BaseInternalViewsetTests):
         self.assertTrue(log.principal_username)
         self.assertIn("not found", log.description)
         self.assertIn("username='nonexistent_user'", log.description)
+        self.assertIsNone(log.tenant)
+
+    @patch(
+        "management.principal.proxy.PrincipalProxy.request_filtered_principals",
+        return_value={
+            "status_code": 200,
+            "data": [
+                {
+                    "username": "test_user",
+                    "email": "test_user@redhat.com",
+                    "is_org_admin": "false",
+                    "org_id": "12345",
+                }
+            ],
+        },
+    )
+    def test_user_lookup_creates_audit_log_on_email_search(self, _):
+        email = "test_user@redhat.com"
+        tenant = Tenant.objects.create(tenant_name="test_tenant", org_id="12345")
+        Principal.objects.create(username="test_user", tenant=tenant)
+
+        self.client.get(f"{self.API_PATH}?email={email}", **self.request.META)
+
+        audit_logs = AuditLog.objects.filter(resource_type=AuditLog.USER, action=AuditLog.READ)
+        self.assertEqual(audit_logs.count(), 1)
+        log = audit_logs.first()
+        self.assertIn("email='test_user@redhat.com'", log.description)
         self.assertIsNone(log.tenant)
 
     def test_user_lookup_no_audit_log_on_bad_input(self):
@@ -2854,6 +2882,60 @@ class InternalViewsetUserLookupTests(BaseInternalViewsetTests):
         self.assertIn("error querying bop", log.description)
         self.assertIn("username='test_user'", log.description)
         self.assertIsNone(log.tenant)
+
+    @patch(
+        "management.principal.proxy.PrincipalProxy.request_filtered_principals",
+        return_value={
+            "status_code": 200,
+            "data": [
+                {
+                    "username": "test_user",
+                    "email": "test_user@redhat.com",
+                    "is_org_admin": "false",
+                    "org_id": "12345",
+                }
+            ],
+        },
+    )
+    def test_user_lookup_creates_audit_log_on_tenant_error(self, _):
+        response = self.client.get(f"{self.API_PATH}?username=test_user", **self.request.META)
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        audit_logs = AuditLog.objects.filter(resource_type=AuditLog.USER, action=AuditLog.READ)
+        self.assertEqual(audit_logs.count(), 1)
+        log = audit_logs.first()
+        self.assertIn("error resolving tenant", log.description)
+
+    @patch(
+        "management.principal.proxy.PrincipalProxy.request_filtered_principals",
+        return_value={
+            "status_code": 200,
+            "data": [
+                {
+                    "username": "test_user",
+                    "email": "test_user@redhat.com",
+                    "is_org_admin": "false",
+                    "org_id": "12345",
+                }
+            ],
+        },
+    )
+    @patch(
+        "internal.views.get_principal",
+        side_effect=Exception("something went wrong"),
+    )
+    def test_user_lookup_creates_audit_log_on_principal_error(self, __, _):
+        Tenant.objects.create(tenant_name="test_tenant", org_id="12345")
+
+        response = self.client.get(f"{self.API_PATH}?username=test_user", **self.request.META)
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        audit_logs = AuditLog.objects.filter(resource_type=AuditLog.USER, action=AuditLog.READ)
+        self.assertEqual(audit_logs.count(), 1)
+        log = audit_logs.first()
+        self.assertIn("error resolving principal", log.description)
 
 
 @override_settings(ATOMIC_RETRY_DISABLED=True)
