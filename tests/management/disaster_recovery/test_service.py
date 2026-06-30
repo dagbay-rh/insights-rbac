@@ -19,7 +19,6 @@ from management.relation_replicator.types import (
     SubjectReference,
 )
 from management.role.model import Role
-from management.role_binding.model import RoleBinding
 from management.tenant_mapping.model import TenantMapping
 from management.workspace.model import Workspace
 
