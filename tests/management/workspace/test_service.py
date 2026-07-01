@@ -59,8 +59,8 @@ class FakeNotify:
 class WorkspaceServiceTest(TestCase):
     """Tests for WorkspaceService._wait_for_notify_post_commit."""
 
-    @patch("management.workspace.service.select.select")
-    @patch("management.workspace.service.connection")
+    @patch("internal.pg_notify_wait.select.select")
+    @patch("internal.pg_notify_wait.connection")
     def test_wait_for_notify_post_commit_listen_unlisten(self, mock_connection, mock_select):
         # Arrange
         mock_conn = Mock()
@@ -91,8 +91,8 @@ class WorkspaceServiceTest(TestCase):
         self.assertTrue(any("LISTEN" in str(c) for c in executed_sql_calls))
         self.assertTrue(any("UNLISTEN" in str(c) for c in executed_sql_calls))
 
-    @patch("management.workspace.service.select.select")
-    @patch("management.workspace.service.connection")
+    @patch("internal.pg_notify_wait.select.select")
+    @patch("internal.pg_notify_wait.connection")
     def test_wait_for_notify_post_commit_payload_trimmed(self, mock_connection, mock_select):
         # Arrange: notification payload contains extra spaces; should still match
         mock_conn = Mock()
@@ -121,8 +121,8 @@ class WorkspaceServiceTest(TestCase):
         self.assertTrue(any("LISTEN" in str(c) for c in executed_sql_calls))
         self.assertTrue(any("UNLISTEN" in str(c) for c in executed_sql_calls))
 
-    @patch("management.workspace.service.select.select")
-    @patch("management.workspace.service.connection")
+    @patch("internal.pg_notify_wait.select.select")
+    @patch("internal.pg_notify_wait.connection")
     def test_wait_for_notify_post_commit_timeout(self, mock_connection, mock_select):
         # Arrange: no readability, so we loop until timeout and then exit
         mock_conn = Mock()
@@ -548,7 +548,7 @@ class WorkspaceServiceDestroyTests(WorkspaceServiceTestBase):
 
     def _do_test_destroy_with_bindings_v2(self, role: RoleV2):
         replicator = InMemoryRelationReplicator(self.tuples)
-        binding_service = RoleBindingService(tenant=self.tenant, replicator=replicator)
+        binding_service = RoleBindingService(tenant=self.tenant, replicator=replicator, skip_scope_validation=True)
         workspace_service = WorkspaceService(replicator=replicator)
 
         group = Group.objects.create(tenant=self.tenant, name="a group")

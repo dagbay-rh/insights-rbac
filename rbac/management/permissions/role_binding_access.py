@@ -18,13 +18,16 @@
 """Role binding access permissions using Kessel Inventory API."""
 
 import logging
+import uuid
 
 from feature_flags import FEATURE_FLAGS
 from management.permissions.workspace_inventory_access import (
     WorkspaceInventoryAccessChecker,
 )
 from management.principal.proxy import get_kessel_principal_id
+from management.workspace.model import Workspace
 from rest_framework import permissions
+from rest_framework.exceptions import NotFound, ParseError
 
 from api.models import Tenant
 
@@ -227,6 +230,34 @@ class RoleBindingKesselAccessPermission(permissions.BasePermission):
             return get_kessel_principal_id(request)
         return None
 
+    def _validate_workspace_exists(self, request, resource_id):
+        """Validate that a workspace exists in the request's tenant.
+
+        Raises NotFound if the workspace does not exist for the tenant.
+        Silently returns if the resource_id is not a valid UUID (handled elsewhere).
+        """
+        tenant = getattr(request, "tenant", None)
+        if tenant is None:
+            return
+
+        try:
+            validated_uuid = uuid.UUID(str(resource_id))
+        except (ValueError, AttributeError):
+            # Not a valid UUID — skip existence check; Kessel will handle the error
+            return
+
+        try:
+            exists = Workspace.objects.filter(id=validated_uuid, tenant=tenant).exists()
+        except TypeError:
+            logger.exception(
+                "Error checking workspace existence for resource_id %s",
+                resource_id,
+            )
+            return
+
+        if not exists:
+            raise NotFound(detail=f"Workspace with id '{resource_id}' not found.")
+
     def _check_single_resource(self, request, resource_type, resource_id, relation, principal_id=None) -> bool:
         """Check access on a single resource via Kessel or org-admin check.
 
@@ -236,8 +267,17 @@ class RoleBindingKesselAccessPermission(permissions.BasePermission):
                          don't pre-resolve).
         """
         if resource_type not in self.ALLOWED_RESOURCE_TYPES:
-            logger.debug("Denied access for unknown resource_type: %s", resource_type)
-            return False
+            allowed = ", ".join(sorted(self.ALLOWED_RESOURCE_TYPES))
+            raise ParseError(f"'{resource_type}' is not a valid resource_type. Allowed values: {allowed}.")
+
+        if resource_type == "workspace":
+            try:
+                uuid.UUID(str(resource_id))
+            except ValueError:
+                raise ParseError(detail=f"'{resource_id}' is not a valid UUID for resource_id.")
+
+        if resource_type == "workspace":
+            self._validate_workspace_exists(request, resource_id)
 
         if resource_type == "tenant":
             is_org_admin = getattr(request.user, "admin", False)

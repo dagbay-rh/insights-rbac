@@ -24,6 +24,10 @@ from enum import Enum
 from typing import Dict, TYPE_CHECKING, Union
 
 from django.conf import settings
+from internal.migration_coordination import (
+    build_migration_notify_resource_context,
+    migration_notify_coordination,
+)
 from kessel.relations.v1beta1 import common_pb2
 
 if TYPE_CHECKING:
@@ -84,6 +88,10 @@ class ReplicationEventType(str, Enum):
     BATCH_CREATE_ROLE_BINDING = "batch_create_role_binding"
     UPDATE_ROLE_BINDINGS_FOR_SUBJECT = "update_role_bindings_for_subject"
     REMOVE_DELETED_WORKSPACE_BINDINGS = "remove_deleted_workspace_bindings"
+    UPDATE_ROOT_WORKSPACE_TENANTS = "update_root_workspace_tenants"
+    REMOVE_ROOT_PARENT_TENANT_RELATIONSHIPS = "remove_root_parent_tenant_relationships"
+    DR_CORRECTIVE_ADD = "dr_corrective_add"
+    DR_CORRECTIVE_REMOVE = "dr_corrective_remove"
 
 
 class ReplicationEvent:
@@ -112,6 +120,14 @@ class ReplicationEvent:
 
     def resource_context(self) -> Dict[str, object] | None:
         """Build context for all replication events that have identifiable resources."""
+        coordination = migration_notify_coordination(self.event_type)
+        if coordination is not None:
+            migration_context = build_migration_notify_resource_context(self.event_type, self.event_info, coordination)
+            if migration_context is not None:
+                return migration_context
+            if coordination.require_notify_token:
+                return None
+
         # Validate org_id exists for all events
         org_id = str(self.event_info.get("org_id", ""))
         if not org_id:

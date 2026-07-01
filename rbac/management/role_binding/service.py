@@ -32,6 +32,8 @@ from management.permission.scope_service import (
     SCOPE_DISPLAY_NAME,
     Scope,
     default_implicit_resource_service,
+    permission_scope_cache,
+    resolve_workspace_scope,
     scope_for_resource,
 )
 from management.principal.model import Principal
@@ -74,6 +76,7 @@ class UpdateRoleBindingResult:
     resource_type: str
     subject: Group | Principal
     resource_name: Optional[str] = None
+    custom_default_group_created: Optional[Group] = None
 
 
 logger = logging.getLogger(__name__)
@@ -944,7 +947,7 @@ class RoleBindingService:
         except Exception as e:
             logger.error(f"Failed to restore default bindings for tenant {self.tenant.org_id}: {e}")
 
-    def _maybe_customize_default_group(self, subject: Subject) -> Subject:
+    def _maybe_customize_default_group(self, subject: Subject) -> tuple[Subject, Optional[Group]]:
         """If subject is the public tenant's default access group, customize it for this tenant.
 
         When modifying role bindings for the public tenant's system default access group,
@@ -954,9 +957,13 @@ class RoleBindingService:
         If the tenant already has a custom default group, returns that instead.
 
         Returns the original subject unchanged when it is not the public default group.
+
+        Returns:
+            A tuple of (subject, created_group). created_group is the newly created custom
+            default group if one was created, or None otherwise.
         """
         if not subject.is_group:
-            return subject
+            return subject, None
         group = subject.entity
         if group.admin_default:
             raise InvalidFieldError(
@@ -964,11 +971,11 @@ class RoleBindingService:
                 "Role bindings for the admin default group cannot be modified.",
             )
         if not (group.platform_default and group.system):
-            return subject
+            return subject, None
 
         existing_custom = Group.objects.filter(platform_default=True, tenant=self.tenant).first()
         if existing_custom is not None:
-            return Subject(type=SubjectType.GROUP, entity=existing_custom)
+            return Subject(type=SubjectType.GROUP, entity=existing_custom), None
 
         from management.group.definer import clone_default_group_in_public_schema
 
@@ -976,7 +983,7 @@ class RoleBindingService:
         if custom_group is None:
             raise RuntimeError(f"Failed to create custom default access group for tenant {self.tenant.org_id}")
 
-        return Subject(type=SubjectType.GROUP, entity=custom_group)
+        return Subject(type=SubjectType.GROUP, entity=custom_group), custom_group
 
     @atomic
     def update_role_bindings_for_subject(
@@ -1019,7 +1026,7 @@ class RoleBindingService:
 
         subject = Subject.objects.by_type(type=subject_type, id=subject_id)
 
-        subject = self._maybe_customize_default_group(subject)
+        subject, created_custom_group = self._maybe_customize_default_group(subject)
 
         self._validate_subject(subject.entity)
 
@@ -1037,6 +1044,7 @@ class RoleBindingService:
             resource_type=resource_type,
             subject=subject.entity,
             resource_name=self.get_resource_name(resource_id, resource_type),
+            custom_default_group_created=created_custom_group,
         )
 
         logger.info(
@@ -1113,6 +1121,10 @@ class RoleBindingService:
         Uses ``ImplicitResourceService.highest_scope_for_permissions`` to compute
         the scope from each role's permission strings.
 
+        For standard (child) workspaces, additionally rejects roles that have
+        any explicit-DEFAULT permissions or no permissions at all, since those
+        represent grants no service checks at that workspace level.
+
         Must be called after ``_validate_resource`` which ensures the resource
         exists. Empty *roles* is valid (means "unbind all") and skips the check.
 
@@ -1124,21 +1136,40 @@ class RoleBindingService:
         if self._skip_scope_validation or not roles:
             return
 
-        expected = scope_for_resource(resource_type, resource_id, self.tenant)
-        if expected is None:
-            if resource_type in ("workspace", "tenant"):
+        is_standard_workspace = False
+        expected: Scope
+        if resource_type == "workspace":
+            result = resolve_workspace_scope(resource_id, self.tenant)
+            if result is None:
                 raise NotFoundError(resource_type, resource_id)
-            return
+            expected, is_standard_workspace = result
+        else:
+            resolved = scope_for_resource(resource_type, resource_id, self.tenant)
+            if resolved is None:
+                if resource_type == "tenant":
+                    raise NotFoundError(resource_type, resource_id)
+                return
+            expected = resolved
+
+        explicit_default_ids = permission_scope_cache.explicit_default_ids if is_standard_workspace else frozenset()
 
         mismatched: list[str] = []
         for role in roles:
-            perm_strings = list(role.permissions.values_list("permission", flat=True))
+            perm_rows = list(role.permissions.values_list("id", "permission"))
+            perm_strings = [row[1] for row in perm_rows]
             role_scope = default_implicit_resource_service.highest_scope_for_permissions(perm_strings)
             if role_scope != expected:
                 mismatched.append(f"{role.name} ({role.uuid})")
+            elif is_standard_workspace:
+                if not perm_rows:
+                    mismatched.append(f"{role.name} ({role.uuid})")
+                elif explicit_default_ids:
+                    perm_ids = {row[0] for row in perm_rows}
+                    if perm_ids & explicit_default_ids:
+                        mismatched.append(f"{role.name} ({role.uuid})")
 
         if mismatched:
-            scope_label = SCOPE_DISPLAY_NAME[expected]
+            scope_label = "Standard Workspace" if is_standard_workspace else SCOPE_DISPLAY_NAME[expected]
             raise InvalidFieldError(
                 "roles",
                 f"The following roles are not scoped for this resource ({scope_label}): {', '.join(mismatched)}",

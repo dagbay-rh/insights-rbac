@@ -153,6 +153,12 @@ paths:
                       id: 550e8400-e29b-41d4-a716-446655440001
                     sources:
                       - id: 550e8400-e29b-41d4-a716-446655440001
+        '400':
+          description: The server could not understand the request due to invalid syntax.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problems.Problem400'
         '401':
           description: Access is unauthorized.
           content:
@@ -326,6 +332,12 @@ paths:
                           id: 550e8400-e29b-41d4-a716-446655440001
                           name: Engineering Workspace
                           type: workspace
+        '400':
+          description: The server could not understand the request due to invalid syntax.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problems.Problem400'
         '401':
           description: Access is unauthorized.
           content:
@@ -572,7 +584,7 @@ paths:
         - name: name
           in: query
           required: false
-          description: Filter by role name. Exact match by default; use * as a wildcard for partial matching (e.g. foo*).
+          description: Filter by role name. Case-insensitive substring match by default; use * for glob patterns (e.g. foo*).
           schema:
             type: string
           explode: false
@@ -586,7 +598,14 @@ paths:
         - name: resource_id
           in: query
           required: false
-          description: Filter by resource ID. Requires resource_type to be specified.
+          description: 'Filter by resource ID. For workspace: UUID. For tenant: tenant resource ID (format: {domain}/{org_id}). Requires resource_type unless resource.tenant.org_id is provided.'
+          schema:
+            type: string
+          explode: false
+        - name: resource.tenant.org_id
+          in: query
+          required: false
+          description: Org ID of the tenant resource to filter by. Cannot be combined with resource_id. When provided, resource_type is implicitly 'tenant'.
           schema:
             type: string
           explode: false
@@ -598,6 +617,13 @@ paths:
             allOf:
               - $ref: '#/components/schemas/FieldMask'
             default: id,name,description,last_modified
+          explode: false
+        - name: permission
+          in: query
+          required: false
+          description: Filter by permission string(s). Comma-separated exact match (e.g. 'inventory:hosts:read' or 'inventory:hosts:read,rbac:workspace:write').
+          schema:
+            type: string
           explode: false
         - name: order_by
           in: query
@@ -652,6 +678,12 @@ paths:
                         name: Workspace Admin
                         description: description
                         last_modified: '2024-08-04T12:00:00Z'
+        '400':
+          description: The server could not understand the request due to invalid syntax.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problems.Problem400'
         '401':
           description: Access is unauthorized.
           content:
@@ -797,6 +829,12 @@ paths:
                         resource_type: hosts
                         operation: write
                     last_modified: '2024-08-04T12:00:00Z'
+        '400':
+          description: The server could not understand the request due to invalid syntax.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problems.Problem400'
         '401':
           description: Access is unauthorized.
           content:
@@ -1000,7 +1038,7 @@ paths:
         - name: name
           in: query
           required: false
-          description: Case sensitive exact match of workspace by name.
+          description: Filter by workspace name. Case-insensitive substring match by default; use * for glob patterns (e.g. foo*).
           schema:
             type: string
           explode: false
@@ -1053,6 +1091,12 @@ paths:
                     description: This is a basic workspace.
                     created: 2024-05-06T12:20-12-0700
                     modified: 2024-05-06T12:20-12-0700
+        '400':
+          description: The server could not understand the request due to invalid syntax.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problems.Problem400'
         '401':
           description: Access is unauthorized.
           content:
@@ -1157,6 +1201,33 @@ paths:
                 anyOf:
                   - $ref: '#/components/schemas/Workspaces.ReadWorkspaceResponse'
                   - $ref: '#/components/schemas/Workspaces.ReadWorkspaceWithAncestryResponse'
+              examples:
+                example0:
+                  value:
+                    _: 200
+                    id: e4277742-b91c-43f1-a185-b827e8574345
+                    parent_id: c1f729e2-3e2b-4f9e-b247-a4b568393e11
+                    type: standard
+                    name: Alpha Workspace
+                    description: Create a standard workspace.
+                    created: '2024-08-04T12:00:00Z'
+                    modified: '2024-08-04T12:00:00Z'
+                example1:
+                  value:
+                    _: 200
+                    id: e4277742-b91c-43f1-a185-b827e8574345
+                    parent_id: c1f729e2-3e2b-4f9e-b247-a4b568393e11
+                    type: standard
+                    name: Alpha Workspace
+                    description: Create a standard workspace.
+                    created: '2024-08-04T12:00:00Z'
+                    modified: '2024-08-04T12:00:00Z'
+        '400':
+          description: The server could not understand the request due to invalid syntax.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problems.Problem400'
         '401':
           description: Access is unauthorized.
           content:
@@ -1325,7 +1396,9 @@ paths:
           content:
             application/problem+json:
               schema:
-                $ref: '#/components/schemas/Problems.Workspace.Problem400WorkspaceNotEmpty'
+                anyOf:
+                  - $ref: '#/components/schemas/Problems.Problem400'
+                  - $ref: '#/components/schemas/Problems.Workspace.Problem400WorkspaceNotEmpty'
         '401':
           description: Access is unauthorized.
           content:
@@ -1851,6 +1924,7 @@ components:
         propertyName: type
         mapping:
           group: '#/components/schemas/RoleBindings.GroupSubject'
+          user: '#/components/schemas/RoleBindings.UserSubject'
     RoleBindings.BatchCreateRoleBindingsRequest:
       type: object
       required:
@@ -1910,9 +1984,8 @@ components:
           type: object
           properties:
             id:
-              allOf:
-                - $ref: '#/components/schemas/UUID'
-              description: UUID that uniquely identifies the resource
+              type: string
+              description: Identifier of the resource
             type:
               type: string
               description: Type of resource
@@ -1949,8 +2022,8 @@ components:
       description: Request body for creating role bindings
       example:
         resource:
-          id: 550e8400-e29b-41d4-a716-446655440001
-          type: workspace
+          id: redhat/12345
+          type: tenant
         subject:
           id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
           type: group
@@ -1996,8 +2069,7 @@ components:
       type: object
       properties:
         id:
-          allOf:
-            - $ref: '#/components/schemas/UUID'
+          type: string
           description: Resource identifier
         name:
           type: string

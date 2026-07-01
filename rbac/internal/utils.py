@@ -31,6 +31,7 @@ from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.urls import resolve
+from internal.pg_notify_wait import replicate_with_notify
 from internal.schemas import INVENTORY_INPUT_SCHEMAS, RELATION_INPUT_SCHEMAS
 from jsonschema import validate
 from management.atomic_transactions import atomic, atomic_block, atomic_with_retry
@@ -462,14 +463,15 @@ def remove_legacy_root_workspace_tenant_parent_relations() -> dict:
     def flush_batch() -> None:
         if not batch:
             return
-        replicator.replicate(
+        replicate_with_notify(
+            replicator,
             ReplicationEvent(
-                event_type=ReplicationEventType.MIGRATE_TENANT_GROUPS,
-                info={"action": "remove_root_workspace_tenant_parent", "batch_size": len(batch)},
+                event_type=ReplicationEventType.REMOVE_ROOT_PARENT_TENANT_RELATIONSHIPS,
+                info={"batch_size": len(batch)},
                 partition_key=PartitionKey.byEnvironment(),
                 add=[],
                 remove=batch,
-            )
+            ),
         )
         batch.clear()
         logger.info(f"Processed {tenants_processed} of {tenants_total} tenants")
