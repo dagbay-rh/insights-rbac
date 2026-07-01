@@ -36,11 +36,20 @@ class ParityCheckTasksTest(IdentityRequest):
     """Test the Kessel parity check tasks."""
 
     @staticmethod
-    def _collect_log_text(mock_logger):
+    def _format_log_call(c):
+        """Format a single mock log call, handling both f-string and %s-style messages."""
+        if not c.args:
+            return ""
+        if len(c.args) > 1:
+            return c.args[0] % c.args[1:]
+        return c.args[0]
+
+    @classmethod
+    def _collect_log_text(cls, mock_logger):
         """Collect all info, warning, and exception log calls into a single string for assertion."""
         all_calls = mock_logger.info.call_args_list + mock_logger.warning.call_args_list
         all_calls += mock_logger.exception.call_args_list
-        return "\n".join(c.args[0] if c.args else "" for c in all_calls)
+        return "\n".join(cls._format_log_call(c) for c in all_calls)
 
     def setUp(self):
         """Set up the parity check task tests."""
@@ -1096,3 +1105,161 @@ class ParityCheckTasksTest(IdentityRequest):
         self.assertIn("2 pairs", log_text)
         self.assertIn("0 roles", log_text)
         self.assertIn("0 groups", log_text)
+
+    @override_settings(PARITY_CHECK_ENABLED=True, PARITY_CHECK_ORG_IDS="test_org_id")
+    @patch(
+        "management.inventory_checker.inventory_api_check.WorkspaceRelationInventoryChecker.check_workspace_descendants"
+    )
+    def test_sub_check_log_uses_info_when_all_pass(self, mock_check_workspace):
+        """Test that sub-check breakdown is logged at INFO level when all checks pass."""
+        self.tenant.org_id = "test_org_id"
+        self.tenant.save()
+        mock_check_workspace.return_value = (True, [])
+
+        with patch("management.tasks.logger") as mock_logger:
+            run_kessel_parity_checks_in_worker()
+
+        info_text = "\n".join(self._format_log_call(c) for c in mock_logger.info.call_args_list)
+        warning_text = "\n".join(self._format_log_call(c) for c in mock_logger.warning.call_args_list)
+        self.assertIn("Sub-check results for tenant", info_text)
+        self.assertNotIn("Sub-check results for tenant", warning_text)
+
+    @override_settings(PARITY_CHECK_ENABLED=True, PARITY_CHECK_ORG_IDS="test_org_id")
+    @patch(
+        "management.inventory_checker.inventory_api_check.WorkspaceRelationInventoryChecker.check_workspace_descendants"
+    )
+    def test_sub_check_log_uses_warning_when_any_fail(self, mock_check_workspace):
+        """Test that sub-check breakdown is logged at WARNING level when any check fails."""
+        self.tenant.org_id = "test_org_id"
+        self.tenant.save()
+        mock_check_workspace.return_value = (False, [])
+
+        with patch("management.tasks.logger") as mock_logger:
+            run_kessel_parity_checks_in_worker()
+
+        info_text = "\n".join(self._format_log_call(c) for c in mock_logger.info.call_args_list)
+        warning_text = "\n".join(self._format_log_call(c) for c in mock_logger.warning.call_args_list)
+        self.assertNotIn("Sub-check results for tenant", info_text)
+        self.assertIn("Sub-check results for tenant", warning_text)
+
+    @override_settings(PARITY_CHECK_ENABLED=True, PARITY_CHECK_ORG_IDS="test_org_id")
+    @patch(
+        "management.inventory_checker.inventory_api_check.WorkspaceRelationInventoryChecker.check_workspace_descendants"
+    )
+    def test_detailed_failure_shows_missing_workspace_pairs(self, mock_check_workspace):
+        """Test that failed workspace pairs appear as MISSING lines in the log."""
+        self.tenant.org_id = "test_org_id"
+        self.tenant.save()
+        mock_check_workspace.return_value = (
+            False,
+            [
+                {"workspace_id": "ws-1", "parent_id": "ws-root", "exists": True},
+                {"workspace_id": "ws-2", "parent_id": "ws-root", "exists": False},
+            ],
+        )
+
+        with patch("management.tasks.logger") as mock_logger:
+            run_kessel_parity_checks_in_worker()
+
+        log_text = self._collect_log_text(mock_logger)
+        self.assertIn("MISSING: workspace ws-2 -> parent ws-root", log_text)
+        self.assertNotIn("MISSING: workspace ws-1", log_text)
+
+    @override_settings(PARITY_CHECK_ENABLED=True, PARITY_CHECK_ORG_IDS="test_org_id")
+    @patch(
+        "management.inventory_checker.inventory_api_check.CustomRolePermissionChecker.check_custom_role_permissions"
+    )
+    @patch(
+        "management.inventory_checker.inventory_api_check.WorkspaceRelationInventoryChecker.check_workspace_descendants"
+    )
+    def test_detailed_failure_shows_failed_roles(self, mock_check_workspace, mock_check_role_perms):
+        """Test that failed custom roles appear as FAILED lines in the log."""
+        self.tenant.org_id = "test_org_id"
+        self.tenant.save()
+
+        role1 = CustomRoleV2.objects.create(name="my-failing-role", tenant=self.tenant)
+        perm1 = Permission.objects.create(permission="inventory:hosts:read", tenant=self.tenant)
+        role1.permissions.add(perm1)
+
+        mock_check_workspace.return_value = (True, [])
+        mock_check_role_perms.return_value = False
+
+        with patch("management.tasks.logger") as mock_logger:
+            run_kessel_parity_checks_in_worker()
+
+        log_text = self._collect_log_text(mock_logger)
+        self.assertIn(f"FAILED: role my-failing-role ({role1.uuid})", log_text)
+
+    @override_settings(PARITY_CHECK_ENABLED=True, PARITY_CHECK_ORG_IDS="test_org_id")
+    @patch(
+        "management.inventory_checker.inventory_api_check.WorkspaceRelationInventoryChecker.check_workspace_descendants"
+    )
+    def test_detailed_failure_shows_missing_bootstrap_checks(self, mock_check_workspace):
+        """Test that failed bootstrap checks appear as MISSING lines in the log."""
+        self.tenant.org_id = "test_org_id"
+        self.tenant.save()
+        mock_check_workspace.return_value = (True, [])
+
+        bootstrap_details = [
+            {
+                "name": "default_workspace_parent",
+                "check": "rbac/workspace:ws-1#parent@rbac/workspace:ws-2",
+                "exists": True,
+            },
+            {"name": "root_workspace_tenant", "check": "rbac/workspace:ws-r#tenant@rbac/tenant:t-1", "exists": False},
+        ]
+        self.mock_bootstrap_checker.return_value = (False, bootstrap_details)
+
+        with patch("management.tasks.logger") as mock_logger:
+            run_kessel_parity_checks_in_worker()
+
+        log_text = self._collect_log_text(mock_logger)
+        self.assertIn("MISSING: root_workspace_tenant (rbac/workspace:ws-r#tenant@rbac/tenant:t-1)", log_text)
+        self.assertNotIn("MISSING: default_workspace_parent", log_text)
+
+    @override_settings(PARITY_CHECK_ENABLED=True, PARITY_CHECK_ORG_IDS="test_org_id")
+    @patch("management.inventory_checker.inventory_api_check.GroupPrincipalInventoryChecker.check_relationships")
+    @patch(
+        "management.inventory_checker.inventory_api_check.WorkspaceRelationInventoryChecker.check_workspace_descendants"
+    )
+    def test_detailed_failure_shows_failed_groups(self, mock_check_workspace, mock_check_group):
+        """Test that failed groups appear as FAILED lines in the log."""
+        self.tenant.org_id = "test_org_id"
+        self.tenant.save()
+
+        group1 = Group.objects.create(name="my-failing-group", tenant=self.tenant)
+        p1 = Principal.objects.create(username="user1", tenant=self.tenant, user_id="uid1")
+        group1.principals.add(p1)
+
+        mock_check_workspace.return_value = (True, [])
+        mock_check_group.return_value = {
+            "group_uuid": str(group1.uuid),
+            "principal_relations": [{"id": "localhost/uid1", "relation_exists": False}],
+        }
+
+        with patch("management.tasks.logger") as mock_logger:
+            run_kessel_parity_checks_in_worker()
+
+        log_text = self._collect_log_text(mock_logger)
+        self.assertIn(f"FAILED: group my-failing-group ({group1.uuid})", log_text)
+
+    @override_settings(PARITY_CHECK_ENABLED=True, PARITY_CHECK_ORG_IDS="test_org_id")
+    @patch(
+        "management.inventory_checker.inventory_api_check.WorkspaceRelationInventoryChecker.check_workspace_descendants"
+    )
+    def test_detailed_failure_caps_at_20_items(self, mock_check_workspace):
+        """Test that detailed failure output caps at 20 items with a '... and N more' suffix."""
+        self.tenant.org_id = "test_org_id"
+        self.tenant.save()
+
+        pair_results = [{"workspace_id": f"ws-{i}", "parent_id": "root", "exists": False} for i in range(25)]
+        mock_check_workspace.return_value = (False, pair_results)
+
+        with patch("management.tasks.logger") as mock_logger:
+            run_kessel_parity_checks_in_worker()
+
+        log_text = self._collect_log_text(mock_logger)
+        self.assertIn("MISSING: workspace ws-0 -> parent root", log_text)
+        self.assertIn("MISSING: workspace ws-19 -> parent root", log_text)
+        self.assertNotIn("ws-20", log_text)
+        self.assertIn("... and 5 more", log_text)
