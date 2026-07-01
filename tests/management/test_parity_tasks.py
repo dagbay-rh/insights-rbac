@@ -35,6 +35,13 @@ BOOTSTRAP_CHECKER_PATH = (
 class ParityCheckTasksTest(IdentityRequest):
     """Test the Kessel parity check tasks."""
 
+    @staticmethod
+    def _collect_log_text(mock_logger):
+        """Collect all info, warning, and exception log calls into a single string for assertion."""
+        all_calls = mock_logger.info.call_args_list + mock_logger.warning.call_args_list
+        all_calls += mock_logger.exception.call_args_list
+        return "\n".join(c.args[0] if c.args else "" for c in all_calls)
+
     def setUp(self):
         """Set up the parity check task tests."""
         super().setUp()
@@ -134,7 +141,7 @@ class ParityCheckTasksTest(IdentityRequest):
         self.tenant.save()
 
         # Mock the checker to return True (all checks pass)
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
 
         result = run_kessel_parity_checks_in_worker()
 
@@ -172,7 +179,7 @@ class ParityCheckTasksTest(IdentityRequest):
         self.tenant.save()
 
         # Mock the checker to return False (checks failed)
-        mock_check_workspace.return_value = False
+        mock_check_workspace.return_value = (False, [])
 
         result = run_kessel_parity_checks_in_worker()
 
@@ -201,7 +208,7 @@ class ParityCheckTasksTest(IdentityRequest):
         self.tenant.save()
 
         # Mock the checker to return True
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
 
         result = run_kessel_parity_checks_in_worker()
 
@@ -246,7 +253,7 @@ class ParityCheckTasksTest(IdentityRequest):
         )
 
         # Mock the checker to return True for first, False for second
-        mock_check_workspace.side_effect = [True, False]
+        mock_check_workspace.side_effect = [(True, []), (False, [])]
 
         result = run_kessel_parity_checks_in_worker()
 
@@ -277,7 +284,7 @@ class ParityCheckTasksTest(IdentityRequest):
         self.tenant.save()
 
         # Mock the checker
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
 
         run_kessel_parity_checks_in_worker()
 
@@ -352,7 +359,7 @@ class ParityCheckTasksTest(IdentityRequest):
         role2.permissions.add(perm2)
 
         # Mock both checkers to return True
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
         mock_check_role_perms.return_value = True
 
         result = run_kessel_parity_checks_in_worker()
@@ -398,7 +405,7 @@ class ParityCheckTasksTest(IdentityRequest):
         role1.permissions.add(perm1)
 
         # Mock workspace check to pass, custom role check to fail
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
         mock_check_role_perms.return_value = False
 
         result = run_kessel_parity_checks_in_worker()
@@ -432,7 +439,7 @@ class ParityCheckTasksTest(IdentityRequest):
         role1.permissions.add(perm1)
 
         # Mock workspace check to fail, custom role check to pass
-        mock_check_workspace.return_value = False
+        mock_check_workspace.return_value = (False, [])
         mock_check_role_perms.return_value = True
 
         result = run_kessel_parity_checks_in_worker()
@@ -461,7 +468,7 @@ class ParityCheckTasksTest(IdentityRequest):
         self.tenant.save()
 
         # Mock workspace check to pass
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
 
         result = run_kessel_parity_checks_in_worker()
 
@@ -504,7 +511,7 @@ class ParityCheckTasksTest(IdentityRequest):
 
         CustomRoleV2.objects.create(name="role1", tenant=self.tenant)
 
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
         mock_check_role_perms.side_effect = RuntimeError("gRPC connection timeout")
 
         result = run_kessel_parity_checks_in_worker()
@@ -537,7 +544,7 @@ class ParityCheckTasksTest(IdentityRequest):
         CustomRoleV2.objects.create(name="empty-role", tenant=self.tenant)
 
         # Mock workspace check to pass
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
         # Empty permission list returns True
         mock_check_role_perms.return_value = True
 
@@ -567,7 +574,7 @@ class ParityCheckTasksTest(IdentityRequest):
         """Bootstrap parity success should increment counters and mark tenant as passed."""
         self.tenant.org_id = "test_org_id"
         self.tenant.save()
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
 
         bootstrap_details = [
             {"name": "default_workspace_parent", "exists": True},
@@ -594,7 +601,7 @@ class ParityCheckTasksTest(IdentityRequest):
         """Bootstrap parity failure should mark tenant as failed even when other checks pass."""
         self.tenant.org_id = "test_org_id"
         self.tenant.save()
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
 
         bootstrap_details = [
             {"name": "default_workspace_parent", "exists": True},
@@ -621,7 +628,7 @@ class ParityCheckTasksTest(IdentityRequest):
         """Missing TenantMapping should skip bootstrap check and fail the tenant."""
         self.tenant.org_id = "test_org_id"
         self.tenant.save()
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
         self.tenant_mapping.delete()
 
         result = run_kessel_parity_checks_in_worker()
@@ -643,7 +650,7 @@ class ParityCheckTasksTest(IdentityRequest):
         """Missing root workspace should skip bootstrap check and fail the tenant."""
         self.tenant.org_id = "test_org_id"
         self.tenant.save()
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
 
         self.child_workspace.delete()
         self.default_workspace.delete()
@@ -666,7 +673,7 @@ class ParityCheckTasksTest(IdentityRequest):
         """When the bootstrap checker raises, the tenant is still counted and marked failed."""
         self.tenant.org_id = "test_org_id"
         self.tenant.save()
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
         self.mock_bootstrap_checker.side_effect = Exception("gRPC unavailable")
 
         result = run_kessel_parity_checks_in_worker()
@@ -696,7 +703,7 @@ class ParityCheckTasksTest(IdentityRequest):
         p2 = Principal.objects.create(username="user2", tenant=self.tenant, user_id="uid2")
         group1.principals.add(p1, p2)
 
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
         mock_check_group.return_value = {
             "group_uuid": str(group1.uuid),
             "principal_relations": [
@@ -735,7 +742,7 @@ class ParityCheckTasksTest(IdentityRequest):
         p1 = Principal.objects.create(username="user1", tenant=self.tenant, user_id="uid1")
         group1.principals.add(p1)
 
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
         mock_check_group.return_value = {
             "group_uuid": str(group1.uuid),
             "principal_relations": [
@@ -765,7 +772,7 @@ class ParityCheckTasksTest(IdentityRequest):
 
         Group.objects.create(name="empty-group", tenant=self.tenant)
 
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
 
         result = run_kessel_parity_checks_in_worker()
 
@@ -794,7 +801,7 @@ class ParityCheckTasksTest(IdentityRequest):
         p_no_uid = Principal.objects.create(username="no-uid", tenant=self.tenant, user_id=None)
         group1.principals.add(p_no_uid)
 
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
 
         result = run_kessel_parity_checks_in_worker()
 
@@ -823,7 +830,7 @@ class ParityCheckTasksTest(IdentityRequest):
         group1.principals.add(p1)
         group2.principals.add(p2)
 
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
         mock_check_group.side_effect = [
             {
                 "group_uuid": str(group1.uuid),
@@ -869,7 +876,7 @@ class ParityCheckTasksTest(IdentityRequest):
         p1 = Principal.objects.create(username="user1", tenant=self.tenant, user_id="uid1")
         group1.principals.add(p1)
 
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
         mock_check_role_perms.return_value = True
         mock_check_group.return_value = {
             "group_uuid": str(group1.uuid),
@@ -901,7 +908,7 @@ class ParityCheckTasksTest(IdentityRequest):
         p1 = Principal.objects.create(username="user1", tenant=self.tenant, user_id="uid1")
         group1.principals.add(p1)
 
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
         mock_check_group.side_effect = RuntimeError("gRPC connection timeout")
 
         result = run_kessel_parity_checks_in_worker()
@@ -923,7 +930,7 @@ class ParityCheckTasksTest(IdentityRequest):
         self.tenant.org_id = "test_org_id"
         self.tenant.save()
 
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
 
         # Even though PARITY_CHECK_ENABLED=False, explicit org_ids should work
         result = run_kessel_parity_checks_in_worker(org_ids=["test_org_id"])
@@ -948,7 +955,7 @@ class ParityCheckTasksTest(IdentityRequest):
         self.tenant.org_id = "test_org_id"
         self.tenant.save()
 
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
 
         result = run_kessel_parity_checks_in_worker(org_ids=["test_org_id", "test_org_id", "test_org_id"])
 
@@ -972,10 +979,120 @@ class ParityCheckTasksTest(IdentityRequest):
         self.tenant.org_id = "test_org_id"
         self.tenant.save()
 
-        mock_check_workspace.return_value = True
+        mock_check_workspace.return_value = (True, [])
 
         result = run_kessel_parity_checks_in_worker(org_ids=["  test_org_id  "])
 
         mock_check_workspace.assert_called_once()
         self.assertEqual(result["total_tenants"], 1)
         self.assertEqual(result["tenants_checked"][0]["org_id"], "test_org_id")
+
+    @override_settings(PARITY_CHECK_ENABLED=True, PARITY_CHECK_ORG_IDS="test_org_id")
+    @patch("management.inventory_checker.inventory_api_check.GroupPrincipalInventoryChecker.check_relationships")
+    @patch(
+        "management.inventory_checker.inventory_api_check.CustomRolePermissionChecker.check_custom_role_permissions"
+    )
+    @patch(
+        "management.inventory_checker.inventory_api_check.WorkspaceRelationInventoryChecker.check_workspace_descendants"
+    )
+    def test_per_sub_check_logging_all_pass(self, mock_check_workspace, mock_check_role_perms, mock_check_group):
+        """Test that per-sub-check breakdown appears in logs when all checks pass."""
+        self.tenant.org_id = "test_org_id"
+        self.tenant.save()
+
+        role1 = CustomRoleV2.objects.create(name="role1", tenant=self.tenant)
+        perm1 = Permission.objects.create(permission="inventory:hosts:read", tenant=self.tenant)
+        role1.permissions.add(perm1)
+
+        group1 = Group.objects.create(name="group1", tenant=self.tenant)
+        p1 = Principal.objects.create(username="user1", tenant=self.tenant, user_id="uid1")
+        group1.principals.add(p1)
+
+        mock_check_workspace.return_value = (True, [])
+        mock_check_role_perms.return_value = True
+        mock_check_group.return_value = {
+            "group_uuid": str(group1.uuid),
+            "principal_relations": [{"id": "localhost/uid1", "relation_exists": True}],
+        }
+
+        with patch("management.tasks.logger") as mock_logger:
+            run_kessel_parity_checks_in_worker()
+
+        log_text = self._collect_log_text(mock_logger)
+        self.assertIn("Workspace hierarchy: PASSED", log_text)
+        self.assertIn("Custom roles:        PASSED", log_text)
+        self.assertIn("Bootstrap:           PASSED", log_text)
+        self.assertIn("Group-principal:     PASSED", log_text)
+
+    @override_settings(PARITY_CHECK_ENABLED=True, PARITY_CHECK_ORG_IDS="test_org_id")
+    @patch("management.inventory_checker.inventory_api_check.GroupPrincipalInventoryChecker.check_relationships")
+    @patch(
+        "management.inventory_checker.inventory_api_check.CustomRolePermissionChecker.check_custom_role_permissions"
+    )
+    @patch(
+        "management.inventory_checker.inventory_api_check.WorkspaceRelationInventoryChecker.check_workspace_descendants"
+    )
+    def test_per_sub_check_logging_mixed_results(self, mock_check_workspace, mock_check_role_perms, mock_check_group):
+        """Test that per-sub-check breakdown shows FAILED for failing sub-checks."""
+        self.tenant.org_id = "test_org_id"
+        self.tenant.save()
+
+        role1 = CustomRoleV2.objects.create(name="role1", tenant=self.tenant)
+        perm1 = Permission.objects.create(permission="inventory:hosts:read", tenant=self.tenant)
+        role1.permissions.add(perm1)
+
+        group1 = Group.objects.create(name="group1", tenant=self.tenant)
+        p1 = Principal.objects.create(username="user1", tenant=self.tenant, user_id="uid1")
+        group1.principals.add(p1)
+
+        mock_check_workspace.return_value = (False, [])
+        mock_check_role_perms.return_value = True
+        mock_check_group.return_value = {
+            "group_uuid": str(group1.uuid),
+            "principal_relations": [{"id": "localhost/uid1", "relation_exists": False}],
+        }
+
+        with patch("management.tasks.logger") as mock_logger:
+            run_kessel_parity_checks_in_worker()
+
+        log_text = self._collect_log_text(mock_logger)
+        self.assertIn("Workspace hierarchy: FAILED", log_text)
+        self.assertIn("Custom roles:        PASSED", log_text)
+        self.assertIn("Bootstrap:           PASSED", log_text)
+        self.assertIn("Group-principal:     FAILED", log_text)
+
+    @override_settings(PARITY_CHECK_ENABLED=True, PARITY_CHECK_ORG_IDS="test_org_id")
+    @patch(
+        "management.inventory_checker.inventory_api_check.WorkspaceRelationInventoryChecker.check_workspace_descendants"
+    )
+    def test_final_summary_includes_seeded_role_result(self, mock_check_workspace):
+        """Test that the final summary log includes seeded role hierarchy result."""
+        self.tenant.org_id = "test_org_id"
+        self.tenant.save()
+
+        mock_check_workspace.return_value = (True, [])
+
+        with patch("management.tasks.logger") as mock_logger:
+            run_kessel_parity_checks_in_worker()
+
+        log_text = self._collect_log_text(mock_logger)
+        self.assertIn("Seeded role hierarchy: PASSED", log_text)
+
+    @override_settings(PARITY_CHECK_ENABLED=True, PARITY_CHECK_ORG_IDS="test_org_id")
+    @patch(
+        "management.inventory_checker.inventory_api_check.WorkspaceRelationInventoryChecker.check_workspace_descendants"
+    )
+    def test_per_sub_check_logging_includes_item_counts(self, mock_check_workspace):
+        """Test that per-sub-check breakdown includes item counts."""
+        self.tenant.org_id = "test_org_id"
+        self.tenant.save()
+
+        mock_check_workspace.return_value = (True, [])
+
+        with patch("management.tasks.logger") as mock_logger:
+            run_kessel_parity_checks_in_worker()
+
+        log_text = self._collect_log_text(mock_logger)
+        self.assertIn("2 pairs", log_text)
+        self.assertIn("0 roles", log_text)
+        self.assertIn("0 groups", log_text)
