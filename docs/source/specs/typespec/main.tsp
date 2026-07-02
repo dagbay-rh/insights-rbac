@@ -573,7 +573,7 @@ namespace Workspaces {
             }
       }
     )
-    @post op create(@body body: CreateWorkspaceRequest): CreateWorkspaceResponse | Problems.CommonProblems;
+    @post op create(@body body: CreateWorkspaceRequest): CreateWorkspaceResponse | Problems.CommonProblems | Problems.Problem400AlreadyExists;
 
     @doc("Get a workspace in tenant")
     @summary("Get a workspace in tenant")
