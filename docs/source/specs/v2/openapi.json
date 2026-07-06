@@ -1681,6 +1681,17 @@
               "default": "name"
             },
             "explode": false
+          },
+          {
+            "name": "with_ancestry",
+            "in": "query",
+            "required": false,
+            "description": "Include ancestor and fallback workspaces (root, default, ungrouped) in the response. Set to true for tree navigation. Defaults to false, returning only workspaces the user has explicit access to.",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "explode": false
           }
         ],
         "responses": {

@@ -736,7 +736,7 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
 
             url = reverse("v2_management:workspace-list")
             client = APIClient()
-            response = client.get(url, format="json", **headers)
+            response = client.get(f"{url}?with_ancestry=true", format="json", **headers)
 
             # Should return 200 with fallback workspaces (root, default, ungrouped)
             self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -1211,7 +1211,7 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
 
             url = reverse("v2_management:workspace-list")
             client = APIClient()
-            response = client.get(url, format="json", **headers)
+            response = client.get(f"{url}?with_ancestry=true", format="json", **headers)
 
             # Should return 200 with fallback workspaces (root, default, ungrouped)
             self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -1321,7 +1321,7 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
 
             url = reverse("v2_management:workspace-list")
             client = APIClient()
-            response = client.get(url, format="json", **headers)
+            response = client.get(f"{url}?with_ancestry=true", format="json", **headers)
 
             # Should have access to the workspace and all its ancestors
             self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -1367,7 +1367,7 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
 
             url = reverse("v2_management:workspace-list")
             client = APIClient()
-            response = client.get(url, format="json", **headers)
+            response = client.get(f"{url}?with_ancestry=true", format="json", **headers)
 
             # Should return 200 with fallback workspaces (root, default, ungrouped)
             self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -2476,8 +2476,8 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
             url = reverse("v2_management:workspace-list")
             client = APIClient()
 
-            # Query with type=all - should return 200 with fallback workspaces
-            response = client.get(f"{url}?type=all", format="json", **headers)
+            # Query with type=all and with_ancestry - should return 200 with fallback workspaces
+            response = client.get(f"{url}?type=all&with_ancestry=true", format="json", **headers)
 
             self.assertEqual(response.status_code, status.HTTP_200_OK)
             self.assertIn("data", response.data)
@@ -2640,8 +2640,8 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
             url = reverse("v2_management:workspace-list")
             client = APIClient()
 
-            # Query with type=root - should return root workspace from fallback
-            response = client.get(f"{url}?type=root", format="json", **headers)
+            # Query with type=root and with_ancestry - should return root workspace from fallback
+            response = client.get(f"{url}?type=root&with_ancestry=true", format="json", **headers)
 
             self.assertEqual(response.status_code, status.HTTP_200_OK)
             self.assertIn("data", response.data)
@@ -2674,8 +2674,8 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
             url = reverse("v2_management:workspace-list")
             client = APIClient()
 
-            # Query with type=default - should return default workspace from fallback
-            response = client.get(f"{url}?type=default", format="json", **headers)
+            # Query with type=default and with_ancestry - should return default workspace from fallback
+            response = client.get(f"{url}?type=default&with_ancestry=true", format="json", **headers)
 
             self.assertEqual(response.status_code, status.HTTP_200_OK)
             self.assertIn("data", response.data)

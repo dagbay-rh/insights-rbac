@@ -37,6 +37,11 @@ class WorkspaceListInputSerializer(serializers.Serializer):
     GET /v2/workspaces/
     """
 
+    with_ancestry = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text="Include ancestor and fallback workspaces (root, default, ungrouped) in the response.",
+    )
     type = serializers.CharField(required=False, allow_blank=True, help_text="Filter by workspace type")
     name = serializers.CharField(
         required=False,

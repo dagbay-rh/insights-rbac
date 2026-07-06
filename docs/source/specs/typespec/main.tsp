@@ -550,6 +550,10 @@ namespace Workspaces {
         @doc("Sort by specified field(s), prefix with '-' for descending order. Allowed fields: name, created, modified, type.")
         @example("-created")
         @query order_by?: string = "name";
+
+        @doc("Include ancestor and fallback workspaces (root, default, ungrouped) in the response. Set to true for tree navigation. Defaults to false, returning only workspaces the user has explicit access to.")
+        @example(false)
+        @query with_ancestry?: boolean = false;
     ): WorkspaceListResponse | Problems.CommonProblems;
 
     @doc("Create workspace in tenant")
