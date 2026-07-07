@@ -81,8 +81,11 @@ state_load() {
       err "State file contains invalid entries -- refusing to load: ${PARITY_STATE_FILE}"
       return 1
     fi
-    # shellcheck disable=SC1090
-    source "${PARITY_STATE_FILE}"
+    while IFS='=' read -r key value; do
+      [[ -z "${key}" ]] && continue
+      printf -v "${key}" '%s' "${value}"
+      export "${key}"
+    done < "${PARITY_STATE_FILE}"
   fi
 }
 

@@ -237,7 +237,7 @@ PARITY_STEP=cleanup ./scripts/ephemeral/rbac-parity-toolkit.sh --check
 
 ## State File
 
-The toolkit persists state between phases in `~/.cache/rbac-dr-state.env` (plain key=value format). This allows running phases independently:
+The toolkit persists state between phases in `/tmp/rbac-parity-state.env` (plain key=value format). This allows running phases independently:
 
 ```bash
 # Run setup, then come back later for simulate
