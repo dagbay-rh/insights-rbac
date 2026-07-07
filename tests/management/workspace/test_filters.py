@@ -373,7 +373,7 @@ class WorkspaceFilterBackendIntegrationTests(TransactionIdentityRequest):
         return_value=True,
     )
     def test_list_returns_fallback_workspaces_when_no_real_access(self, mock_flag, mock_channel):
-        """Test that list returns 200 with fallback workspaces when user has no real workspace access in V2 mode."""
+        """with_ancestry=true returns fallback workspaces when user has no real workspace access."""
         mock_stub = MagicMock()
         mock_channel.return_value.__enter__.return_value = MagicMock()
 
@@ -406,7 +406,7 @@ class WorkspaceFilterBackendIntegrationTests(TransactionIdentityRequest):
         return_value=True,
     )
     def test_v2_list_non_admin_without_inventory_access_includes_root_and_default(self, mock_flag, mock_channel):
-        """Users with no workspace relations in Inventory still list root and default (and ungrouped) workspaces."""
+        """with_ancestry=true: users with no Inventory access still list root, default, and ungrouped."""
         mock_stub = MagicMock()
         mock_channel.return_value.__enter__.return_value = MagicMock()
         mock_stub.StreamedListObjects.return_value = iter([])
@@ -432,7 +432,7 @@ class WorkspaceFilterBackendIntegrationTests(TransactionIdentityRequest):
         return_value=True,
     )
     def test_list_returns_fallback_when_inventory_ids_missing_in_rbac_db(self, mock_flag, mock_channel):
-        """Inventory IDs with no matching Workspace row for this tenant fall back to root/default/ungrouped."""
+        """with_ancestry=true: stale Inventory IDs fall back to root/default/ungrouped."""
         mock_stub = MagicMock()
         mock_channel.return_value.__enter__.return_value = MagicMock()
         orphan_id = uuid4()
@@ -461,6 +461,61 @@ class WorkspaceFilterBackendIntegrationTests(TransactionIdentityRequest):
         "feature_flags.FEATURE_FLAGS.is_workspace_access_check_v2_enabled",
         return_value=True,
     )
+    def test_list_stale_inventory_ids_returns_empty_without_ancestry(self, mock_flag, mock_channel):
+        """with_ancestry=false: stale Inventory IDs return empty, not fallback."""
+        mock_stub = MagicMock()
+        mock_channel.return_value.__enter__.return_value = MagicMock()
+        orphan_id = uuid4()
+        mock_stub.StreamedListObjects.side_effect = lambda *args, **kwargs: iter(
+            self._create_mock_workspace_responses([orphan_id])
+        )
+
+        with patch(
+            "kessel.inventory.v1beta2.inventory_service_pb2_grpc.KesselInventoryServiceStub",
+            return_value=mock_stub,
+        ):
+            request_context = self._create_request_context(self.customer_data, self.user_data, is_org_admin=False)
+            headers = request_context["request"].META
+            url = reverse("v2_management:workspace-list")
+            response = APIClient().get(f"{url}?with_ancestry=false", format="json", **headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["data"], [])
+        self.assertEqual(response.data["meta"]["count"], 0)
+
+    @patch("management.inventory_client.create_client_channel_inventory")
+    @patch(
+        "feature_flags.FEATURE_FLAGS.is_workspace_access_check_v2_enabled",
+        return_value=True,
+    )
+    def test_list_defaults_to_without_ancestry_when_param_omitted(self, mock_flag, mock_channel):
+        """Omitting with_ancestry defaults to false: only explicitly accessible workspaces returned."""
+        mock_stub = MagicMock()
+        mock_channel.return_value.__enter__.return_value = MagicMock()
+        mock_stub.StreamedListObjects.side_effect = lambda *args, **kwargs: iter(
+            self._create_mock_workspace_responses([self.standard_workspace.id])
+        )
+
+        with patch(
+            "kessel.inventory.v1beta2.inventory_service_pb2_grpc.KesselInventoryServiceStub",
+            return_value=mock_stub,
+        ):
+            request_context = self._create_request_context(self.customer_data, self.user_data, is_org_admin=False)
+            headers = request_context["request"].META
+            url = reverse("v2_management:workspace-list")
+            response = APIClient().get(url, format="json", **headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("meta", response.data)
+        self.assertIn("data", response.data)
+        returned_ids = {str(ws["id"]) for ws in response.data["data"]}
+        self.assertEqual(returned_ids, {str(self.standard_workspace.id)})
+
+    @patch("management.inventory_client.create_client_channel_inventory")
+    @patch(
+        "feature_flags.FEATURE_FLAGS.is_workspace_access_check_v2_enabled",
+        return_value=True,
+    )
     def test_list_without_ancestry_returns_only_explicitly_accessible(self, mock_flag, mock_channel):
         """with_ancestry=false returns only workspaces Inventory explicitly granted, no ancestors."""
         mock_stub = MagicMock()
@@ -479,11 +534,10 @@ class WorkspaceFilterBackendIntegrationTests(TransactionIdentityRequest):
             response = APIClient().get(f"{url}?with_ancestry=false", format="json", **headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("meta", response.data)
+        self.assertIn("data", response.data)
         returned_ids = {str(ws["id"]) for ws in response.data["data"]}
-        self.assertIn(str(self.standard_workspace.id), returned_ids)
-        self.assertNotIn(str(self.root_workspace.id), returned_ids)
-        self.assertNotIn(str(self.default_workspace.id), returned_ids)
-        self.assertNotIn(str(self.ungrouped_workspace.id), returned_ids)
+        self.assertEqual(returned_ids, {str(self.standard_workspace.id)})
 
     @patch("management.inventory_client.create_client_channel_inventory")
     @patch(
@@ -506,7 +560,9 @@ class WorkspaceFilterBackendIntegrationTests(TransactionIdentityRequest):
             response = APIClient().get(f"{url}?with_ancestry=false", format="json", **headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data["data"]), 0)
+        self.assertIn("meta", response.data)
+        self.assertEqual(response.data["data"], [])
+        self.assertEqual(response.data["meta"]["count"], 0)
 
     @patch(
         "feature_flags.FEATURE_FLAGS.is_workspace_access_check_v2_enabled",

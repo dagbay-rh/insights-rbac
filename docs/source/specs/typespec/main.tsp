@@ -551,7 +551,7 @@ namespace Workspaces {
         @example("-created")
         @query order_by?: string = "name";
 
-        @doc("Include ancestor and fallback workspaces (root, default, ungrouped) in the response. Set to true for tree navigation. Defaults to false, returning only workspaces the user has explicit access to.")
+        @doc("When true, list responses include ancestor workspaces for tree navigation and fallback workspaces (root, default, ungrouped) when the user has no explicit access. When false (default), only workspaces with explicit Inventory permission are returned.")
         @example(false)
         @query with_ancestry?: boolean = false;
     ): WorkspaceListResponse | Problems.CommonProblems;

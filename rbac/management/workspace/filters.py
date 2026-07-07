@@ -76,8 +76,9 @@ class WorkspaceAccessFilterBackend(filters.BaseFilterBackend):
         # Call is_user_allowed_v2 - handles both list and detail cases
         # Side effect: when workspace_id is None (list actions), is_user_allowed_v2 sets
         # request.permission_tuples with accessible workspace IDs, used for filtering below
+        with_ancestry = getattr(request, "with_ancestry", False) if workspace_id is None else False
         try:
-            has_access = is_user_allowed_v2(request, relation, workspace_id)
+            has_access = is_user_allowed_v2(request, relation, workspace_id, with_ancestry=with_ancestry)
         except Exception as e:
             logger.exception(
                 "Exception in is_user_allowed_v2: user=%s, org_id=%s, workspace_id=%s, relation=%s, error=%s",

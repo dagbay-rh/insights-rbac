@@ -1340,6 +1340,38 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
         "feature_flags.FEATURE_FLAGS.is_workspace_access_check_v2_enabled",
         return_value=True,
     )
+    def test_workspace_list_excludes_ancestors_when_with_ancestry_false(self, mock_flag, mock_channel):
+        """with_ancestry=false returns only the accessible workspace, not its ancestors."""
+        mock_stub = MagicMock()
+        mock_channel.return_value.__enter__.return_value = MagicMock()
+        mock_responses = self._create_mock_workspace_responses([self.standard_sub_workspace.id])
+        mock_stub.StreamedListObjects.side_effect = lambda *args, **kwargs: iter(mock_responses)
+
+        with patch(
+            "kessel.inventory.v1beta2.inventory_service_pb2_grpc.KesselInventoryServiceStub",
+            return_value=mock_stub,
+        ):
+            request_context = self._create_request_context(self.customer_data, self.user_data, is_org_admin=False)
+            headers = request_context["request"].META
+            self._setup_access_for_principal(
+                self.user_data["username"],
+                "inventory:groups:read",
+                workspace_id=str(self.standard_sub_workspace.id),
+                platform_default=False,
+            )
+
+            url = reverse("v2_management:workspace-list")
+            response = APIClient().get(f"{url}?with_ancestry=false", format="json", **headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        returned_ids = {str(ws["id"]) for ws in response.data["data"]}
+        self.assertEqual(returned_ids, {str(self.standard_sub_workspace.id)})
+
+    @patch("management.inventory_client.create_client_channel_inventory")
+    @patch(
+        "feature_flags.FEATURE_FLAGS.is_workspace_access_check_v2_enabled",
+        return_value=True,
+    )
     def test_workspace_list_returns_fallback_workspaces_when_no_access(self, mock_flag, mock_channel):
         """Test that workspace list returns fallback workspaces when user has no real workspace access in V2 mode."""
         # Mock Inventory API to return empty list (no accessible workspaces)
