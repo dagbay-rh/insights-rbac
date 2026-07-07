@@ -2455,8 +2455,8 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
         "feature_flags.FEATURE_FLAGS.is_workspace_access_check_v2_enabled",
         return_value=True,
     )
-    def test_workspace_list_type_standard_returns_empty_without_real_access(self, mock_flag, mock_channel):
-        """Test that type=standard returns 200 with empty list when user has no real workspace access in V2 mode."""
+    def test_workspace_list_type_standard_returns_403_without_real_access(self, mock_flag, mock_channel):
+        """Test that type=standard returns 403 when user has no real workspace access and with_ancestry is false."""
         # Mock Inventory API to return empty list (no accessible workspaces)
         mock_stub = MagicMock()
         mock_channel.return_value.__enter__.return_value = MagicMock()
@@ -2475,13 +2475,10 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
             url = reverse("v2_management:workspace-list")
             client = APIClient()
 
-            # Query with type=standard - should return 200 with empty data
-            # (fallback workspaces are root/default/ungrouped, none are type=standard)
+            # Without with_ancestry, fallback workspaces are not applied
             response = client.get(f"{url}?type=standard", format="json", **headers)
 
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
-            self.assertIn("data", response.data)
-            self.assertEqual(len(response.data["data"]), 0)
+            self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     @patch("management.inventory_client.create_client_channel_inventory")
     @patch(
@@ -2619,8 +2616,8 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
         "feature_flags.FEATURE_FLAGS.is_workspace_access_check_v2_enabled",
         return_value=True,
     )
-    def test_workspace_list_no_type_returns_fallback_without_real_access(self, mock_flag, mock_channel):
-        """Test that default list (no type filter) returns fallback workspaces when user has no real workspace access."""
+    def test_workspace_list_no_type_returns_403_without_real_access(self, mock_flag, mock_channel):
+        """Test that default list (no type filter) returns 403 when user has no real workspace access."""
         # Mock Inventory API to return empty list (no accessible workspaces)
         mock_stub = MagicMock()
         mock_channel.return_value.__enter__.return_value = MagicMock()
@@ -2639,13 +2636,10 @@ class WorkspaceInventoryAccessV2Tests(TransactionIdentityRequest):
             url = reverse("v2_management:workspace-list")
             client = APIClient()
 
-            # Query without type filter - should return 200 with fallback workspaces
+            # Omitting with_ancestry defaults to false; no Inventory access returns 403
             response = client.get(url, format="json", **headers)
 
-            # Default type filter is 'standard', so fallback workspaces (root, default, ungrouped)
-            # are filtered out, resulting in empty data
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
-            self.assertIn("data", response.data)
+            self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     @patch("management.inventory_client.create_client_channel_inventory")
     @patch(

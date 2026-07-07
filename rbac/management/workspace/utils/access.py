@@ -395,7 +395,10 @@ def is_user_allowed_v2(request, required_operation, target_workspace, with_ances
                 with record_timing(timings, "get_fallback_workspace_ids"):
                     accessible_workspace_ids = get_fallback_workspace_ids(request.tenant)
 
-            # Store permission tuples for later filtering
+            # Store permission tuples for later filtering.
+            # Note: the contents depend on with_ancestry — with_ancestry=true includes
+            # ancestor and fallback IDs, while false includes only explicitly granted IDs.
+            # Do not cache or reuse these tuples across requests with different with_ancestry values.
             request.permission_tuples = [(None, ws_id) for ws_id in accessible_workspace_ids]
 
             result = bool(accessible_workspace_ids)

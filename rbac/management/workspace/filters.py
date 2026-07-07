@@ -22,6 +22,7 @@ from feature_flags import FEATURE_FLAGS
 from management.workspace.utils import permission_from_request
 from management.workspace.utils.access import is_user_allowed_v2
 from rest_framework import filters
+from rest_framework.exceptions import PermissionDenied
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,8 @@ class WorkspaceAccessFilterBackend(filters.BaseFilterBackend):
 
         # For list actions: check access decision first, then filter by permission_tuples
         if not has_access:
+            if not with_ancestry:
+                raise PermissionDenied("You do not have permission to perform this action.")
             return queryset.none()
 
         # If permission_tuples is set, filter by those IDs
