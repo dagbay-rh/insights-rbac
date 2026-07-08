@@ -194,6 +194,10 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
         input_serializer.is_valid(raise_exception=True)
         validated_params = input_serializer.validated_data
 
+        # Bridge query param to access layer; read by WorkspaceAccessFilterBackend and
+        # passed explicitly to is_user_allowed_v2(with_ancestry=...).
+        request.with_ancestry = validated_params.get("with_ancestry", False)
+
         queryset = self.filter_queryset(self.get_queryset())
         queryset = self._service.list(queryset, validated_params)
 
