@@ -135,3 +135,37 @@ class WorkspaceManager(models.Manager):
             rows = cursor.fetchall()
 
         return [str(row[0]) for row in rows]
+
+    def ancestor_ids_for_workspaces(self, ids, tenant_id):
+        """Return all ancestor IDs for a batch of workspace IDs in a single CTE query.
+
+        Traverses the workspace tree upward from all given workspace IDs,
+        returning the union of all ancestors. Excludes the input workspace IDs
+        themselves. Uses a single database round-trip regardless of how many
+        workspace IDs are provided.
+
+        This is the upward counterpart to descendant_ids_with_parents().
+        """
+        if not ids:
+            return []
+        with connection.cursor() as cursor:
+            sql = """
+                WITH RECURSIVE ancestors AS (
+                    SELECT id, parent_id
+                    FROM management_workspace
+                    WHERE id = ANY(%s::uuid[])
+                    AND tenant_id = %s
+                    UNION
+                    SELECT w.id, w.parent_id
+                    FROM management_workspace w
+                    JOIN ancestors a ON w.id = a.parent_id
+                    WHERE w.tenant_id = %s
+                )
+                SELECT DISTINCT id
+                FROM ancestors
+                WHERE id != ALL(%s::uuid[])
+            """
+            cursor.execute(sql, [ids, tenant_id, tenant_id, ids])
+            rows = cursor.fetchall()
+
+        return [str(row[0]) for row in rows]

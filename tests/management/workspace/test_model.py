@@ -171,6 +171,44 @@ class WorkspaceDescendants(WorkspaceBaseTestCase):
             [],
         )
 
+    def test_ancestor_ids_for_workspaces_single(self):
+        """Test ancestor lookup for a single workspace."""
+        result = Workspace.objects.ancestor_ids_for_workspaces([self.level_3a.id], self.tenant.id)
+        self.assertCountEqual(result, [str(self.root.id), str(self.level_1a.id), str(self.level_2a.id)])
+
+    def test_ancestor_ids_for_workspaces_batch(self):
+        """Test batch ancestor lookup returns union of all ancestors."""
+        result = Workspace.objects.ancestor_ids_for_workspaces([self.level_3a.id, self.level_3b.id], self.tenant.id)
+        expected = {
+            str(self.root.id),
+            str(self.level_1a.id),
+            str(self.level_2a.id),
+            str(self.level_1b.id),
+            str(self.level_2b.id),
+        }
+        self.assertCountEqual(result, list(expected))
+
+    def test_ancestor_ids_for_workspaces_root_has_no_ancestors(self):
+        """Test that root workspace returns no ancestors."""
+        result = Workspace.objects.ancestor_ids_for_workspaces([self.root.id], self.tenant.id)
+        self.assertEqual(result, [])
+
+    def test_ancestor_ids_for_workspaces_empty_input(self):
+        """Test that empty input returns empty list."""
+        result = Workspace.objects.ancestor_ids_for_workspaces([], self.tenant.id)
+        self.assertEqual(result, [])
+
+    def test_ancestor_ids_for_workspaces_cross_tenant_isolation(self):
+        """Test that ancestor lookup respects tenant isolation."""
+        result = Workspace.objects.ancestor_ids_for_workspaces([self.level_3a.id], self.t2.id)
+        self.assertEqual(result, [])
+
+    def test_ancestor_ids_for_workspaces_excludes_input_ids(self):
+        """Test that input workspace IDs are excluded from results."""
+        result = Workspace.objects.ancestor_ids_for_workspaces([self.level_2a.id], self.tenant.id)
+        self.assertNotIn(str(self.level_2a.id), result)
+        self.assertCountEqual(result, [str(self.root.id), str(self.level_1a.id)])
+
 
 class Types(WorkspaceBaseTestCase):
     """Test types on a workspace."""
