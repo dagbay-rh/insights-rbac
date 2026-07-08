@@ -8309,9 +8309,10 @@ class MCPShutdownTests(IdentityRequest):
         super().tearDown()
 
     @patch("management.mcp_views._MCP_TOOL_EXECUTOR")
-    @patch("management.mcp_views._connection_pool")
-    def test_shutdown_sets_flag_and_cleans_up(self, mock_pool, mock_executor):
+    @patch("management.mcp_views._get_connection_pool")
+    def test_shutdown_sets_flag_and_cleans_up(self, mock_get_pool, mock_executor):
         """Positive: mcp_shutdown sets the event flag and calls shutdown/disconnect."""
+        mock_pool = mock_get_pool.return_value
         mcp_shutdown()
 
         self.assertTrue(_shutdown_in_progress.is_set())
@@ -8319,9 +8320,10 @@ class MCPShutdownTests(IdentityRequest):
         mock_pool.disconnect.assert_called_once()
 
     @patch("management.mcp_views._MCP_TOOL_EXECUTOR")
-    @patch("management.mcp_views._connection_pool")
-    def test_shutdown_is_idempotent(self, mock_pool, mock_executor):
+    @patch("management.mcp_views._get_connection_pool")
+    def test_shutdown_is_idempotent(self, mock_get_pool, mock_executor):
         """Edge case: calling mcp_shutdown twice only executes cleanup once."""
+        mock_pool = mock_get_pool.return_value
         mcp_shutdown()
         mcp_shutdown()
 
@@ -8329,9 +8331,10 @@ class MCPShutdownTests(IdentityRequest):
         mock_pool.disconnect.assert_called_once()
 
     @patch("management.mcp_views._MCP_TOOL_EXECUTOR")
-    @patch("management.mcp_views._connection_pool")
-    def test_shutdown_survives_redis_disconnect_error(self, mock_pool, mock_executor):
+    @patch("management.mcp_views._get_connection_pool")
+    def test_shutdown_survives_redis_disconnect_error(self, mock_get_pool, mock_executor):
         """Edge case: Redis disconnect failure does not prevent shutdown."""
+        mock_pool = mock_get_pool.return_value
         mock_pool.disconnect.side_effect = ConnectionError("pool gone")
 
         mcp_shutdown()
