@@ -8282,6 +8282,18 @@ class MCPHealthCheckTests(IdentityRequest):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok"})
 
+    def test_mcp_post_returns_error_during_shutdown(self):
+        """Negative: MCP endpoint returns JSON-RPC error when shutdown is in progress."""
+        _shutdown_in_progress.set()
+        mcp_url = "/_private/_a2s/mcp/"
+        payload = {"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+        response = self.client.post(mcp_url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn("error", body)
+        self.assertEqual(body["error"]["code"], -32000)
+        self.assertIn("shutting down", body["error"]["message"])
+
 
 class MCPShutdownTests(IdentityRequest):
     """Test the mcp_shutdown() function."""

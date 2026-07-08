@@ -5389,6 +5389,9 @@ class MCPView(View):
 
     def post(self, request: HttpRequest) -> HttpResponse:
         """Handle MCP JSON-RPC requests via HTTP POST."""
+        if _shutdown_in_progress.is_set():
+            return _error_response(None, -32000, "Server is shutting down")
+
         org_id = getattr(getattr(request, "user", None), "org_id", None)
         req_id = getattr(request, "req_id", "unknown")
 
@@ -5808,12 +5811,13 @@ def mcp_shutdown() -> None:
         logger.warning("mcp: ThreadPoolExecutor shutdown timed out after %ss", shutdown_timeout)
 
     try:
-        _connection_pool.disconnect()
+        pool = _get_connection_pool()
+        if pool is not None:
+            pool.disconnect()
     except Exception:
         logger.debug("mcp: Redis connection pool disconnect failed (non-fatal)", exc_info=True)
 
     logger.info("mcp: shutdown complete")
-    logging.shutdown()
 
 
 atexit.register(mcp_shutdown)
