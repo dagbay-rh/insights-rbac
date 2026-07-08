@@ -18,6 +18,7 @@
 
 from unittest.mock import patch
 
+from django.conf import settings
 from django.test import override_settings
 from management.group.model import Group
 from management.models import CustomRoleV2, Permission
@@ -889,7 +890,7 @@ class ParityCheckTasksTest(IdentityRequest):
         mock_check_role_perms.return_value = True
         mock_check_group.return_value = {
             "group_uuid": str(group1.uuid),
-            "principal_relations": [{"id": "localhost/uid1", "relation_exists": False}],
+            "principal_relations": [{"id": f"{settings.PRINCIPAL_USER_DOMAIN}/uid1", "relation_exists": False}],
         }
 
         result = run_kessel_parity_checks_in_worker()
@@ -1162,8 +1163,8 @@ class ParityCheckTasksTest(IdentityRequest):
             run_kessel_parity_checks_in_worker()
 
         log_text = self._collect_log_text(mock_logger)
-        self.assertIn("MISSING: workspace ws-2 -> parent ws-root", log_text)
-        self.assertNotIn("MISSING: workspace ws-1", log_text)
+        self.assertIn("MISSING: rbac/workspace:ws-root#parent@rbac/workspace:ws-2", log_text)
+        self.assertNotIn("rbac/workspace:ws-1", log_text)
 
     @override_settings(PARITY_CHECK_ENABLED=True, PARITY_CHECK_ORG_IDS="test_org_id")
     @patch(
@@ -1188,7 +1189,9 @@ class ParityCheckTasksTest(IdentityRequest):
             run_kessel_parity_checks_in_worker()
 
         log_text = self._collect_log_text(mock_logger)
-        self.assertIn(f"FAILED: role my-failing-role ({role1.uuid})", log_text)
+        self.assertIn(
+            f"MISSING (my-failing-role): rbac/role:{role1.uuid}#inventory_hosts_read@rbac/principal:*", log_text
+        )
 
     @override_settings(PARITY_CHECK_ENABLED=True, PARITY_CHECK_ORG_IDS="test_org_id")
     @patch(
@@ -1234,14 +1237,18 @@ class ParityCheckTasksTest(IdentityRequest):
         mock_check_workspace.return_value = (True, [])
         mock_check_group.return_value = {
             "group_uuid": str(group1.uuid),
-            "principal_relations": [{"id": "localhost/uid1", "relation_exists": False}],
+            "principal_relations": [{"id": f"{settings.PRINCIPAL_USER_DOMAIN}/uid1", "relation_exists": False}],
         }
 
         with patch("management.tasks.logger") as mock_logger:
             run_kessel_parity_checks_in_worker()
 
         log_text = self._collect_log_text(mock_logger)
-        self.assertIn(f"FAILED: group my-failing-group ({group1.uuid})", log_text)
+        expected_tuple = (
+            f"MISSING (my-failing-group): rbac/group:{group1.uuid}"
+            f"#member@rbac/principal:{settings.PRINCIPAL_USER_DOMAIN}/uid1"
+        )
+        self.assertIn(expected_tuple, log_text)
 
     @override_settings(PARITY_CHECK_ENABLED=True, PARITY_CHECK_ORG_IDS="test_org_id")
     @patch(
@@ -1259,7 +1266,7 @@ class ParityCheckTasksTest(IdentityRequest):
             run_kessel_parity_checks_in_worker()
 
         log_text = self._collect_log_text(mock_logger)
-        self.assertIn("MISSING: workspace ws-0 -> parent root", log_text)
-        self.assertIn("MISSING: workspace ws-19 -> parent root", log_text)
+        self.assertIn("MISSING: rbac/workspace:root#parent@rbac/workspace:ws-0", log_text)
+        self.assertIn("MISSING: rbac/workspace:root#parent@rbac/workspace:ws-19", log_text)
         self.assertNotIn("ws-20", log_text)
         self.assertIn("... and 5 more", log_text)
