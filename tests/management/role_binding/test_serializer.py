@@ -22,7 +22,16 @@ from unittest.mock import Mock
 
 from django.test import TestCase, override_settings
 
-from management.models import Group, Permission, Principal, RoleBinding, RoleBindingGroup, RoleV2, Workspace
+from management.models import (
+    Group,
+    Permission,
+    Principal,
+    RoleBinding,
+    RoleBindingGroup,
+    RoleBindingPrincipal,
+    RoleV2,
+    Workspace,
+)
 from management.role.v2_service import RoleV2Service
 from management.role_binding.serializer import (
     BatchCreateRoleBindingRequestSerializer,
@@ -1361,7 +1370,7 @@ class RoleBindingListOutputSerializerTest(IdentityRequest):
 
     Tests verify the serializer produces output matching the API spec:
     - role: {id: UUID, name?: string}
-    - subject: {id?: UUID, type: "group", group?: {name, description, user_count}}
+    - subject: {id: UUID, type: "group"|"user", group?: {name, description, user_count}}
     - resource: {id: string, type?: string}
 
     Uses subTest for parametrized field selection coverage.
@@ -1575,6 +1584,50 @@ class RoleBindingListOutputSerializerTest(IdentityRequest):
         # role includes requested name + always-present id
         self.assertEqual(data["role"]["name"], "test_role")
         self.assertIn("id", data["role"])
+
+    def test_subject_id_always_present_for_user_with_unrelated_field_selection(self):
+        """Regression: subject.id must be present for user subjects when fields=role(name).
+
+        Companion to test_subject_id_always_present_with_unrelated_field_selection
+        which covers group subjects. See RHCLOUD-48118.
+        """
+        # Use a separate binding with only a principal entry (no group)
+        user_binding = RoleBinding.objects.create(
+            role=self.role,
+            resource_type="workspace",
+            resource_id="ws-user-1",
+            tenant=self.tenant,
+        )
+        RoleBindingPrincipal.objects.create(
+            principal=self.principal,
+            binding=user_binding,
+            source="direct",
+        )
+        try:
+            fs = RoleBindingFieldSelection.parse("role(name)")
+            data = self._serialize(user_binding, field_selection=fs)
+
+            self.assertIn("id", data["subject"])
+            self.assertEqual(data["subject"]["id"], self.principal.uuid)
+            self.assertEqual(data["subject"]["type"], "user")
+            self.assertEqual(data["role"]["name"], "test_role")
+        finally:
+            user_binding.delete()
+
+    def test_subject_id_always_present_with_resource_only_field_selection(self):
+        """Regression: subject.id must be present even when fields only mention resource.
+
+        Verifies the fix for RHCLOUD-48118 with fields=resource(type) — subject is not
+        mentioned in the field selection at all, but subject.id and subject.type must
+        still appear in the response.
+        """
+        fs = RoleBindingFieldSelection.parse("resource(type)")
+        data = self._serialize(self.binding, field_selection=fs)
+
+        self.assertIn("id", data["subject"])
+        self.assertEqual(data["subject"]["id"], self.group.uuid)
+        self.assertEqual(data["subject"]["type"], "group")
+        self.assertEqual(data["resource"]["type"], "workspace")
 
     def test_field_selection_resource_name(self):
         """resource(name) resolves workspace display name via queryset annotation."""
@@ -2314,8 +2367,8 @@ class UpdateRoleBindingResponseSerializerTests(IdentityRequest):
 
         self.assertEqual(data, {"subject": {"id": self.group.uuid, "type": "group"}})
 
-    def test_field_selection_subject_without_explicit_id(self):
-        """When only subject(group.name) is requested, id and type are still always included."""
+    def test_field_selection_subject_id_always_included_when_not_explicitly_requested(self):
+        """subject.id is always present even when field selection only requests subject(group.name)."""
         result = self._make_group_result()
         field_selection = RoleBindingBySubjectFieldSelection(nested_fields={"subject": {"group.name"}})
         serializer = UpdateRoleBindingResponseSerializer(result, context={"field_selection": field_selection})
