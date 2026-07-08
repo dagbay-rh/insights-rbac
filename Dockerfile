@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1782797275 AS base
+FROM registry.access.redhat.com/hi/python:3.12-fips-builder AS base
 
 USER root
 
@@ -40,8 +40,8 @@ LABEL summary="$SUMMARY" \
 # Very minimal set of packages
 # glibc-langpack-en is needed to set locale to en_US and disable warning about it
 # gcc to compile some python packages (e.g. ciso8601)
-# shadow-utils to make useradd available
-RUN INSTALL_PKGS="python3.12 python3.12-devel glibc-langpack-en libpq-devel gcc shadow-utils libffi-devel" && \
+# postgresql-devel for psycopg2, libffi-devel for cffi
+RUN INSTALL_PKGS="glibc-langpack-en postgresql-devel postgresql gcc libffi-devel" && \
     microdnf --nodocs -y upgrade && \
     microdnf -y --setopt=tsflags=nodocs --setopt=install_weak_deps=0 install $INSTALL_PKGS && \
     rpm -V $INSTALL_PKGS && \
