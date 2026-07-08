@@ -209,6 +209,21 @@ class WorkspaceDescendants(WorkspaceBaseTestCase):
         self.assertNotIn(str(self.level_2a.id), result)
         self.assertCountEqual(result, [str(self.root.id), str(self.level_1a.id)])
 
+    def test_ancestor_ids_for_workspaces_nonexistent_ids(self):
+        """Test that non-existent UUIDs in input are silently ignored."""
+        import uuid
+
+        fake_id = uuid.uuid4()
+        result = Workspace.objects.ancestor_ids_for_workspaces([fake_id], self.tenant.id)
+        self.assertEqual(result, [])
+
+    def test_ancestor_ids_for_workspaces_batch_dedup(self):
+        """Test that batch lookup deduplicates shared ancestors correctly."""
+        result = Workspace.objects.ancestor_ids_for_workspaces([self.level_3a.id, self.level_3b.id], self.tenant.id)
+        # root is ancestor of both branches — must appear exactly once
+        root_count = result.count(str(self.root.id))
+        self.assertEqual(root_count, 1, "Shared ancestor 'root' should appear exactly once")
+
 
 class Types(WorkspaceBaseTestCase):
     """Test types on a workspace."""

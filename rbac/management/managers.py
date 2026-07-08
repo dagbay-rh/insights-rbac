@@ -18,9 +18,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
-from django.db import connection, models
+from django.db import DatabaseError, connection, models
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from management.workspace.model import Workspace
@@ -148,24 +151,31 @@ class WorkspaceManager(models.Manager):
         """
         if not ids:
             return []
-        with connection.cursor() as cursor:
-            sql = """
-                WITH RECURSIVE ancestors AS (
-                    SELECT id, parent_id
-                    FROM management_workspace
-                    WHERE id = ANY(%s::uuid[])
-                    AND tenant_id = %s
-                    UNION
-                    SELECT w.id, w.parent_id
-                    FROM management_workspace w
-                    JOIN ancestors a ON w.id = a.parent_id
-                    WHERE w.tenant_id = %s
-                )
-                SELECT DISTINCT id
-                FROM ancestors
-                WHERE id != ALL(%s::uuid[])
-            """
-            cursor.execute(sql, [ids, tenant_id, tenant_id, ids])
-            rows = cursor.fetchall()
+        try:
+            with connection.cursor() as cursor:
+                sql = """
+                    WITH RECURSIVE ancestors AS (
+                        SELECT id, parent_id
+                        FROM management_workspace
+                        WHERE id = ANY(%s::uuid[])
+                        AND tenant_id = %s
+                        UNION ALL
+                        SELECT w.id, w.parent_id
+                        FROM management_workspace w
+                        JOIN ancestors a ON w.id = a.parent_id
+                        WHERE w.tenant_id = %s
+                    )
+                    SELECT DISTINCT id
+                    FROM ancestors
+                    WHERE id != ALL(%s::uuid[])
+                """
+                cursor.execute(sql, [ids, tenant_id, tenant_id, ids])
+                rows = cursor.fetchall()
+        except DatabaseError:
+            logger.warning(
+                "DatabaseError in ancestor_ids_for_workspaces; returning empty list",
+                exc_info=True,
+            )
+            return []
 
         return [str(row[0]) for row in rows]
