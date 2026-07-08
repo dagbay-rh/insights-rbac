@@ -39,6 +39,7 @@ from management.mcp_views import (
     _validate_permission_format,
     _validate_tool_arguments,
     _validate_uuid_field,
+    _validate_uuid_list,
     _validate_v2_permission,
     _validate_write_payload,
 )
@@ -8247,6 +8248,10 @@ class MCPSchemaValidationTests(MCPToolTestMixin, IdentityRequest):
 class MCPWritePayloadValidationUnitTests(IdentityRequest):
     """Unit tests for write payload validation helper functions."""
 
+    _VALID_UUID = "550e8400-e29b-41d4-a716-446655440000"
+    _VALID_UUID2 = "550e8400-e29b-41d4-a716-446655440001"
+    _VALID_UUID3 = "550e8400-e29b-41d4-a716-446655440002"
+
     # --- _validate_permission_format ---
 
     def test_valid_permission_format(self):
@@ -8322,7 +8327,7 @@ class MCPWritePayloadValidationUnitTests(IdentityRequest):
 
     def test_valid_uuid(self):
         """Valid UUID passes."""
-        self.assertIsNone(_validate_uuid_field("550e8400-e29b-41d4-a716-446655440000", "role_uuid"))
+        self.assertIsNone(_validate_uuid_field(self._VALID_UUID, "role_uuid"))
 
     def test_invalid_uuid(self):
         """Non-UUID string is rejected."""
@@ -8335,179 +8340,189 @@ class MCPWritePayloadValidationUnitTests(IdentityRequest):
         """Empty string UUID passes (optional field)."""
         self.assertIsNone(_validate_uuid_field("", "role_uuid"))
 
+    # --- _validate_uuid_list ---
+
+    def test_uuid_list_valid(self):
+        """List of valid UUIDs passes."""
+        self.assertIsNone(_validate_uuid_list([self._VALID_UUID, self._VALID_UUID2], "ids"))
+
+    def test_uuid_list_invalid_at_index_zero(self):
+        """Invalid UUID at index 0 returns error naming ids[0]."""
+        result = _validate_uuid_list(["bad-uuid", self._VALID_UUID], "ids")
+        self.assertIsNotNone(result)
+        self.assertIn("ids[0]", result)
+
+    def test_uuid_list_invalid_at_later_index(self):
+        """Invalid UUID at a later position includes the correct index in the error."""
+        result = _validate_uuid_list([self._VALID_UUID, "bad-uuid"], "ids")
+        self.assertIsNotNone(result)
+        self.assertIn("ids[1]", result)
+
+    def test_uuid_list_empty_passes(self):
+        """Empty list passes."""
+        self.assertIsNone(_validate_uuid_list([], "ids"))
+
+    def test_uuid_list_none_passes(self):
+        """None passes (treated as empty)."""
+        self.assertIsNone(_validate_uuid_list(None, "ids"))
+
     # --- _validate_write_payload ---
 
     def test_unknown_tool_passes(self):
         """Unknown tools pass validation (no rules to apply)."""
-        from django.test import RequestFactory
-
-        request = RequestFactory().get("/")
-        request.tenant = self.tenant
-        self.assertIsNone(_validate_write_payload("unknown_tool_xyz", {}, request))
+        self.assertIsNone(_validate_write_payload("unknown_tool_xyz", {}))
 
     def test_create_role_v1_valid(self):
         """Valid create_role_v1 payload passes."""
-        from django.test import RequestFactory
-
-        request = RequestFactory().get("/")
-        request.tenant = self.tenant
         args = {
             "name": "Cost Reader",
             "access": [{"permission": "cost-management:cost_model:read"}],
         }
-        self.assertIsNone(_validate_write_payload("create_role_v1", args, request))
+        self.assertIsNone(_validate_write_payload("create_role_v1", args))
 
     def test_create_role_v1_malformed_permission(self):
         """create_role_v1 with malformed permission string is rejected."""
-        from django.test import RequestFactory
-
-        request = RequestFactory().get("/")
-        request.tenant = self.tenant
         args = {
             "name": "Bad Role",
             "access": [{"permission": "cost-management:cost_model"}],
         }
-        result = _validate_write_payload("create_role_v1", args, request)
+        result = _validate_write_payload("create_role_v1", args)
         self.assertIsNotNone(result)
         self.assertIn("malformed", result)
         self.assertIn("access[0]", result)
 
+    def test_create_role_v1_at_max_permissions(self):
+        """create_role_v1 with exactly the max number of permissions passes."""
+        access = [{"permission": f"app:res:verb{i}"} for i in range(_MAX_PERMISSIONS_PER_ROLE)]
+        self.assertIsNone(_validate_write_payload("create_role_v1", {"name": "Big Role", "access": access}))
+
     def test_create_role_v1_exceeds_max_permissions(self):
         """create_role_v1 with too many permissions is rejected."""
-        from django.test import RequestFactory
-
-        request = RequestFactory().get("/")
-        request.tenant = self.tenant
         access = [{"permission": f"app:res:verb{i}"} for i in range(_MAX_PERMISSIONS_PER_ROLE + 1)]
         args = {"name": "Huge Role", "access": access}
-        result = _validate_write_payload("create_role_v1", args, request)
+        result = _validate_write_payload("create_role_v1", args)
         self.assertIsNotNone(result)
         self.assertIn("exceeds the maximum", result)
         self.assertIn(str(_MAX_PERMISSIONS_PER_ROLE), result)
 
     def test_update_role_v1_invalid_uuid(self):
         """update_role_v1 with invalid role_uuid is rejected."""
-        from django.test import RequestFactory
-
-        request = RequestFactory().get("/")
-        request.tenant = self.tenant
         args = {
             "role_uuid": "not-a-uuid",
             "name": "Updated",
             "access": [{"permission": "app:res:read"}],
         }
-        result = _validate_write_payload("update_role_v1", args, request)
+        result = _validate_write_payload("update_role_v1", args)
         self.assertIsNotNone(result)
         self.assertIn("role_uuid", result)
         self.assertIn("not a valid UUID", result)
 
     def test_create_role_v2_valid(self):
         """Valid create_role (V2) payload passes."""
-        from django.test import RequestFactory
-
-        request = RequestFactory().get("/")
-        request.tenant = self.tenant
         args = {
             "name": "Cost Reader",
             "permissions": [{"application": "cost-management", "resource_type": "cost_model", "operation": "read"}],
         }
-        self.assertIsNone(_validate_write_payload("create_role", args, request))
+        self.assertIsNone(_validate_write_payload("create_role", args))
 
     def test_create_role_v2_missing_operation(self):
         """create_role (V2) with missing operation is rejected."""
-        from django.test import RequestFactory
-
-        request = RequestFactory().get("/")
-        request.tenant = self.tenant
         args = {
             "name": "Bad Role",
             "permissions": [{"application": "app", "resource_type": "res"}],
         }
-        result = _validate_write_payload("create_role", args, request)
+        result = _validate_write_payload("create_role", args)
         self.assertIsNotNone(result)
         self.assertIn("operation", result)
 
+    def test_add_roles_to_group_invalid_group_uuid(self):
+        """add_roles_to_group with invalid group_uuid is rejected."""
+        result = _validate_write_payload("add_roles_to_group", {"group_uuid": "bad-uuid", "roles": [self._VALID_UUID]})
+        self.assertIsNotNone(result)
+        self.assertIn("group_uuid", result)
+        self.assertIn("not a valid UUID", result)
+
+    def test_add_roles_to_group_invalid_role_uuid(self):
+        """add_roles_to_group with invalid role UUID in roles list is rejected."""
+        result = _validate_write_payload(
+            "add_roles_to_group", {"group_uuid": self._VALID_UUID, "roles": ["not-a-uuid"]}
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("roles[0]", result)
+
     def test_create_role_bindings_invalid_uuid(self):
         """create_role_bindings with invalid role UUID is rejected."""
-        from django.test import RequestFactory
-
-        request = RequestFactory().get("/")
-        request.tenant = self.tenant
         args = {
             "bindings": [
                 {
                     "role": "not-a-uuid",
-                    "resource": {"type": "workspace", "id": "550e8400-e29b-41d4-a716-446655440000"},
-                    "subject": {"type": "principal", "id": "550e8400-e29b-41d4-a716-446655440001"},
+                    "resource": {"type": "workspace", "id": self._VALID_UUID},
+                    "subject": {"type": "principal", "id": self._VALID_UUID2},
                 }
             ],
         }
-        result = _validate_write_payload("create_role_bindings", args, request)
+        result = _validate_write_payload("create_role_bindings", args)
         self.assertIsNotNone(result)
         self.assertIn("bindings[0].role", result)
         self.assertIn("not a valid UUID", result)
 
-    def test_create_role_bindings_valid(self):
-        """create_role_bindings with valid UUIDs passes."""
-        from django.test import RequestFactory
-
-        request = RequestFactory().get("/")
-        request.tenant = self.tenant
+    def test_create_role_bindings_invalid_subject_id(self):
+        """create_role_bindings with invalid subject.id is rejected."""
         args = {
             "bindings": [
                 {
-                    "role": "550e8400-e29b-41d4-a716-446655440000",
-                    "resource": {"type": "workspace", "id": "550e8400-e29b-41d4-a716-446655440001"},
-                    "subject": {"type": "principal", "id": "550e8400-e29b-41d4-a716-446655440002"},
+                    "role": self._VALID_UUID,
+                    "resource": {"type": "workspace", "id": self._VALID_UUID2},
+                    "subject": {"type": "principal", "id": "bad-subject-id"},
                 }
             ],
         }
-        self.assertIsNone(_validate_write_payload("create_role_bindings", args, request))
+        result = _validate_write_payload("create_role_bindings", args)
+        self.assertIsNotNone(result)
+        self.assertIn("bindings[0].subject.id", result)
+        self.assertIn("not a valid UUID", result)
+
+    def test_create_role_bindings_valid(self):
+        """create_role_bindings with valid UUIDs passes."""
+        args = {
+            "bindings": [
+                {
+                    "role": self._VALID_UUID,
+                    "resource": {"type": "workspace", "id": self._VALID_UUID2},
+                    "subject": {"type": "principal", "id": self._VALID_UUID3},
+                }
+            ],
+        }
+        self.assertIsNone(_validate_write_payload("create_role_bindings", args))
 
     def test_bulk_delete_roles_invalid_uuid(self):
         """bulk_delete_roles with invalid UUID in ids is rejected."""
-        from django.test import RequestFactory
-
-        request = RequestFactory().get("/")
-        request.tenant = self.tenant
-        result = _validate_write_payload("bulk_delete_roles", {"ids": ["valid-looking", "not-uuid"]}, request)
+        result = _validate_write_payload("bulk_delete_roles", {"ids": ["valid-looking", "not-uuid"]})
         self.assertIsNotNone(result)
         self.assertIn("ids[0]", result)
         self.assertIn("not a valid UUID", result)
 
     def test_delete_workspace_invalid_uuid(self):
         """delete_workspace with invalid workspace_uuid is rejected."""
-        from django.test import RequestFactory
-
-        request = RequestFactory().get("/")
-        request.tenant = self.tenant
-        result = _validate_write_payload("delete_workspace", {"workspace_uuid": "bad"}, request)
+        result = _validate_write_payload("delete_workspace", {"workspace_uuid": "bad"})
         self.assertIsNotNone(result)
         self.assertIn("workspace_uuid", result)
 
     def test_update_role_binding_invalid_subject_id(self):
         """update_role_binding with invalid subject_id is rejected."""
-        from django.test import RequestFactory
-
-        request = RequestFactory().get("/")
-        request.tenant = self.tenant
         args = {
-            "resource_id": "550e8400-e29b-41d4-a716-446655440000",
+            "resource_id": self._VALID_UUID,
             "subject_id": "not-valid",
             "subject_type": "principal",
-            "roles": [{"id": "550e8400-e29b-41d4-a716-446655440001"}],
+            "roles": [{"id": self._VALID_UUID2}],
         }
-        result = _validate_write_payload("update_role_binding", args, request)
+        result = _validate_write_payload("update_role_binding", args)
         self.assertIsNotNone(result)
         self.assertIn("subject_id", result)
 
     def test_patch_cross_account_request_invalid_uuid(self):
         """patch_cross_account_request with invalid request_id is rejected."""
-        from django.test import RequestFactory
-
-        request = RequestFactory().get("/")
-        request.tenant = self.tenant
-        result = _validate_write_payload("patch_cross_account_request", {"request_id": "xyz"}, request)
+        result = _validate_write_payload("patch_cross_account_request", {"request_id": "xyz"})
         self.assertIsNotNone(result)
         self.assertIn("request_id", result)
 
@@ -8573,13 +8588,28 @@ class MCPWritePayloadValidationIntegrationTests(MCPToolTestMixin, IdentityReques
         self.assertIn("exceeds the maximum", data["error"]["message"])
 
     def test_valid_payload_passes_through(self):
-        """Valid write payload passes semantic validation and reaches tool execution."""
+        """Valid write payload passes semantic validation and does not return a -32602 error."""
         data = self._call_tool_raw(
             "create_role_v1",
             {"name": "Good Role", "access": [{"permission": "app:resource:read"}]},
         )
-        self.assertNotIn("malformed", json.dumps(data))
-        self.assertNotIn("not a valid UUID", json.dumps(data))
+        # Validation passed — may succeed or fail downstream, but must not be a validation error.
+        if "error" in data:
+            self.assertNotEqual(data["error"]["code"], -32602, msg=f"Unexpected validation error: {data}")
+
+    def test_v2_valid_payload_passes_through(self):
+        """Valid create_role (V2) payload passes semantic validation."""
+        data = self._call_tool_raw(
+            "create_role",
+            {
+                "name": "Good V2 Role",
+                "permissions": [
+                    {"application": "cost-management", "resource_type": "cost_model", "operation": "read"}
+                ],
+            },
+        )
+        if "error" in data:
+            self.assertNotEqual(data["error"]["code"], -32602, msg=f"Unexpected validation error: {data}")
 
     def test_v2_permission_missing_field_rejected(self):
         """V2 permission with missing field rejected through endpoint."""

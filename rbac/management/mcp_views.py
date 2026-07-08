@@ -5659,7 +5659,161 @@ def _validate_uuid_field(value: str, field_name: str) -> str | None:
     return None
 
 
-def _validate_write_payload(tool_name: str, arguments: dict[str, Any], request: HttpRequest) -> str | None:
+def _validate_uuid_list(values: list | None, field_prefix: str) -> str | None:
+    """Validate each item in a list is a valid UUID, returning the first error found."""
+    for i, value in enumerate(values or []):
+        error = _validate_uuid_field(value, f"{field_prefix}[{i}]")
+        if error:
+            return error
+    return None
+
+
+def _validate_v1_perm_entry(entry: Any, index: int) -> str | None:
+    """Validate a single V1 access entry (dict with 'permission' key in correct format)."""
+    perm = entry.get("permission", "") if isinstance(entry, dict) else ""
+    error = _validate_permission_format(perm)
+    return f"access[{index}]: {error}" if error else None
+
+
+def _validate_v2_perm_entry(perm: Any, index: int) -> str | None:
+    """Validate a single V2 permission dict."""
+    if not isinstance(perm, dict):
+        return f"permissions[{index}] must be an object with application, resource_type, operation."
+    return _validate_v2_permission(perm, index)
+
+
+def _validate_role_permissions(
+    arguments: dict[str, Any],
+    *,
+    is_update: bool,
+    role_id_field: str,
+    perms_field: str,
+    per_perm_validator: Callable[[Any, int], str | None],
+) -> str | None:
+    """Validate role arguments: optional UUID on update, permission count limit, per-entry validation."""
+    if is_update:
+        error = _validate_uuid_field(arguments.get(role_id_field, ""), role_id_field)
+        if error:
+            return error
+    perms = arguments.get(perms_field) or []
+    if len(perms) > _MAX_PERMISSIONS_PER_ROLE:
+        return (
+            f"Role has {len(perms)} permissions, which exceeds the maximum of "
+            f"{_MAX_PERMISSIONS_PER_ROLE}. Split into multiple roles for better manageability."
+        )
+    for i, perm in enumerate(perms):
+        error = per_perm_validator(perm, i)
+        if error:
+            return error
+    return None
+
+
+def _validate_add_roles_to_group(arguments: dict[str, Any]) -> str | None:
+    """Validate add_roles_to_group: group_uuid and each role UUID."""
+    error = _validate_uuid_field(arguments.get("group_uuid", ""), "group_uuid")
+    if error:
+        return error
+    return _validate_uuid_list(arguments.get("roles"), "roles")
+
+
+def _validate_create_role_bindings(arguments: dict[str, Any]) -> str | None:
+    """Validate create_role_bindings: UUID fields across all binding entries."""
+    for i, binding in enumerate(arguments.get("bindings") or []):
+        if not isinstance(binding, dict):
+            continue
+        role_val = binding.get("role", "")
+        if isinstance(role_val, str) and role_val:
+            error = _validate_uuid_field(role_val, f"bindings[{i}].role")
+            if error:
+                return error
+        resource = binding.get("resource") or {}
+        if isinstance(resource, dict):
+            res_id = resource.get("id", "")
+            if isinstance(res_id, str) and res_id:
+                error = _validate_uuid_field(res_id, f"bindings[{i}].resource.id")
+                if error:
+                    return error
+        subject = binding.get("subject") or {}
+        if isinstance(subject, dict):
+            sub_id = subject.get("id", "")
+            if isinstance(sub_id, str) and sub_id:
+                error = _validate_uuid_field(sub_id, f"bindings[{i}].subject.id")
+                if error:
+                    return error
+    return None
+
+
+def _validate_workspace_args(arguments: dict[str, Any]) -> str | None:
+    """Validate update_workspace/move_workspace: workspace_id and optional parent_id."""
+    error = _validate_uuid_field(arguments.get("workspace_id", ""), "workspace_id")
+    if error:
+        return error
+    parent = arguments.get("parent_id", "")
+    if parent:
+        return _validate_uuid_field(parent, "parent_id")
+    return None
+
+
+def _validate_update_role_binding(arguments: dict[str, Any]) -> str | None:
+    """Validate update_role_binding: resource_id, subject_id, and role IDs."""
+    error = _validate_uuid_field(arguments.get("resource_id", ""), "resource_id")
+    if error:
+        return error
+    error = _validate_uuid_field(arguments.get("subject_id", ""), "subject_id")
+    if error:
+        return error
+    for i, role in enumerate(arguments.get("roles") or []):
+        if isinstance(role, dict):
+            error = _validate_uuid_field(role.get("id", ""), f"roles[{i}].id")
+            if error:
+                return error
+    return None
+
+
+_WRITE_VALIDATORS: dict[str, Callable[[dict[str, Any]], str | None]] = {
+    "create_role_v1": lambda args: _validate_role_permissions(
+        args,
+        is_update=False,
+        role_id_field="role_uuid",
+        perms_field="access",
+        per_perm_validator=_validate_v1_perm_entry,
+    ),
+    "update_role_v1": lambda args: _validate_role_permissions(
+        args,
+        is_update=True,
+        role_id_field="role_uuid",
+        perms_field="access",
+        per_perm_validator=_validate_v1_perm_entry,
+    ),
+    "create_role": lambda args: _validate_role_permissions(
+        args,
+        is_update=False,
+        role_id_field="role_uuid",
+        perms_field="permissions",
+        per_perm_validator=_validate_v2_perm_entry,
+    ),
+    "update_role": lambda args: _validate_role_permissions(
+        args,
+        is_update=True,
+        role_id_field="role_uuid",
+        perms_field="permissions",
+        per_perm_validator=_validate_v2_perm_entry,
+    ),
+    "patch_role_v1": lambda args: _validate_uuid_field(args.get("role_uuid", ""), "role_uuid"),
+    "add_roles_to_group": _validate_add_roles_to_group,
+    "create_role_bindings": _validate_create_role_bindings,
+    "delete_role_v1": lambda args: _validate_uuid_field(args.get("role_uuid", ""), "role_uuid"),
+    "bulk_delete_roles": lambda args: _validate_uuid_list(args.get("ids"), "ids"),
+    "update_workspace": _validate_workspace_args,
+    "move_workspace": _validate_workspace_args,
+    "delete_workspace": lambda args: _validate_uuid_field(args.get("workspace_uuid", ""), "workspace_uuid"),
+    "update_role_binding": _validate_update_role_binding,
+    "update_cross_account_request": lambda args: _validate_uuid_field(args.get("request_id", ""), "request_id"),
+    "patch_cross_account_request": lambda args: _validate_uuid_field(args.get("request_id", ""), "request_id"),
+}
+
+
+def _validate_write_payload(tool_name: str, arguments: dict[str, Any]) -> str | None:
     """Validate semantic constraints on write tool arguments.
 
     Runs after JSON schema validation to catch domain-specific issues:
@@ -5667,120 +5821,10 @@ def _validate_write_payload(tool_name: str, arguments: dict[str, Any], request: 
     - UUID arguments are valid UUID format
     - Permission counts don't exceed limits
     """
-    if tool_name in ("create_role_v1", "update_role_v1"):
-        if tool_name == "update_role_v1":
-            error = _validate_uuid_field(arguments.get("role_uuid", ""), "role_uuid")
-            if error:
-                return error
-        access_list = arguments.get("access") or []
-        if len(access_list) > _MAX_PERMISSIONS_PER_ROLE:
-            return (
-                f"Role has {len(access_list)} permissions, which exceeds the maximum of "
-                f"{_MAX_PERMISSIONS_PER_ROLE}. Split into multiple roles for better manageability."
-            )
-        for i, entry in enumerate(access_list):
-            perm = entry.get("permission", "") if isinstance(entry, dict) else ""
-            error = _validate_permission_format(perm)
-            if error:
-                return f"access[{i}]: {error}"
+    validator = _WRITE_VALIDATORS.get(tool_name)
+    if validator is None:
         return None
-
-    if tool_name in ("create_role", "update_role"):
-        if tool_name == "update_role":
-            error = _validate_uuid_field(arguments.get("role_uuid", ""), "role_uuid")
-            if error:
-                return error
-        perms = arguments.get("permissions") or []
-        if len(perms) > _MAX_PERMISSIONS_PER_ROLE:
-            return (
-                f"Role has {len(perms)} permissions, which exceeds the maximum of "
-                f"{_MAX_PERMISSIONS_PER_ROLE}. Split into multiple roles for better manageability."
-            )
-        for i, perm in enumerate(perms):
-            if not isinstance(perm, dict):
-                return f"permissions[{i}] must be an object with application, resource_type, operation."
-            error = _validate_v2_permission(perm, i)
-            if error:
-                return error
-        return None
-
-    if tool_name == "patch_role_v1":
-        return _validate_uuid_field(arguments.get("role_uuid", ""), "role_uuid")
-
-    if tool_name == "add_roles_to_group":
-        for i, role_id in enumerate(arguments.get("roles") or []):
-            error = _validate_uuid_field(role_id, f"roles[{i}]")
-            if error:
-                return error
-        return None
-
-    if tool_name == "create_role_bindings":
-        for i, binding in enumerate(arguments.get("bindings") or []):
-            if not isinstance(binding, dict):
-                continue
-            role_val = binding.get("role", "")
-            if isinstance(role_val, str) and role_val:
-                error = _validate_uuid_field(role_val, f"bindings[{i}].role")
-                if error:
-                    return error
-            resource = binding.get("resource") or {}
-            if isinstance(resource, dict):
-                res_id = resource.get("id", "")
-                if isinstance(res_id, str) and res_id:
-                    error = _validate_uuid_field(res_id, f"bindings[{i}].resource.id")
-                    if error:
-                        return error
-            subject = binding.get("subject") or {}
-            if isinstance(subject, dict):
-                sub_id = subject.get("id", "")
-                if isinstance(sub_id, str) and sub_id:
-                    error = _validate_uuid_field(sub_id, f"bindings[{i}].subject.id")
-                    if error:
-                        return error
-        return None
-
-    if tool_name == "delete_role_v1":
-        return _validate_uuid_field(arguments.get("role_uuid", ""), "role_uuid")
-
-    if tool_name == "bulk_delete_roles":
-        for i, role_id in enumerate(arguments.get("ids") or []):
-            error = _validate_uuid_field(role_id, f"ids[{i}]")
-            if error:
-                return error
-        return None
-
-    if tool_name in ("update_workspace", "move_workspace"):
-        error = _validate_uuid_field(arguments.get("workspace_id", ""), "workspace_id")
-        if error:
-            return error
-        parent = arguments.get("parent_id", "")
-        if parent:
-            error = _validate_uuid_field(parent, "parent_id")
-            if error:
-                return error
-        return None
-
-    if tool_name == "delete_workspace":
-        return _validate_uuid_field(arguments.get("workspace_uuid", ""), "workspace_uuid")
-
-    if tool_name == "update_role_binding":
-        error = _validate_uuid_field(arguments.get("resource_id", ""), "resource_id")
-        if error:
-            return error
-        error = _validate_uuid_field(arguments.get("subject_id", ""), "subject_id")
-        if error:
-            return error
-        for i, role in enumerate(arguments.get("roles") or []):
-            if isinstance(role, dict):
-                error = _validate_uuid_field(role.get("id", ""), f"roles[{i}].id")
-                if error:
-                    return error
-        return None
-
-    if tool_name in ("update_cross_account_request", "patch_cross_account_request"):
-        return _validate_uuid_field(arguments.get("request_id", ""), "request_id")
-
-    return None
+    return validator(arguments)
 
 
 def _is_v2_available() -> bool:
@@ -6113,7 +6157,7 @@ def _handle_tools_call(request: HttpRequest, request_id: Any, params: dict[str, 
         return _error_response(request_id, -32602, f"Invalid params for tool '{tool_name}': {validation_error}")
 
     if config.write:
-        write_error = _validate_write_payload(tool_name, arguments, request)
+        write_error = _validate_write_payload(tool_name, arguments)
         if write_error:
             logger.warning("mcp: tools/call tool='%s' write payload validation failed: %s", tool_name, write_error)
             return _error_response(request_id, -32602, f"Invalid params for tool '{tool_name}': {write_error}")
