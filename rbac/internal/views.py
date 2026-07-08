@@ -20,6 +20,7 @@
 import datetime
 import json
 import logging
+import uuid
 from typing import Optional
 
 import requests
@@ -55,9 +56,15 @@ from kessel.inventory.v1beta2 import (
     resource_reference_pb2,
     subject_reference_pb2,
 )
-from kessel.relations.v1beta1 import check_pb2, lookup_pb2, relation_tuples_pb2
-from kessel.relations.v1beta1 import check_pb2_grpc, lookup_pb2_grpc, relation_tuples_pb2_grpc
-from kessel.relations.v1beta1 import common_pb2
+from kessel.relations.v1beta1 import (
+    check_pb2,
+    check_pb2_grpc,
+    common_pb2,
+    lookup_pb2,
+    lookup_pb2_grpc,
+    relation_tuples_pb2,
+    relation_tuples_pb2_grpc,
+)
 from management.cache import JWTCache, TenantCache
 from management.group.relation_api_dual_write_group_handler import RelationApiDualWriteGroupHandler
 from management.inventory_checker.inventory_api_check import (
@@ -71,10 +78,8 @@ from management.models import BindingMapping, Group, Permission, Principal, Reso
 from management.principal.proxy import (
     API_TOKEN_HEADER,
     CLIENT_ID_HEADER,
+    PrincipalProxy,
     USER_ENV_HEADER,
-)
-from management.principal.proxy import PrincipalProxy
-from management.principal.proxy import (
     bop_request_status_count,
     bop_request_time_tracking,
 )
@@ -94,11 +99,13 @@ from management.tasks import (
     fix_missing_binding_base_tuples_in_worker,
     migrate_binding_scope_in_worker,
     migrate_data_in_worker,
+    migrate_role_scope_if_changed_in_worker,
     recompute_tenant_role_bindings_in_worker,
     recover_workspace_events_in_worker,
     remove_deleted_workspace_bindings_in_worker,
     remove_unassigned_system_binding_mappings_in_worker,
     replicate_default_workspaces_in_worker,
+    replicate_updated_workspaces_in_worker,
     run_kessel_parity_checks_in_worker,
     run_migrations_in_worker,
     run_ocm_performance_in_worker,
@@ -1987,7 +1994,9 @@ def check_workspace_relation(request, workspace_uuid):
         try:
             if workspace_pairs:
                 workspace_uuid = str(workspace_uuid)
-                workspace_descendants_correct = WorkspaceRelationChecker.check_workspace_descendants(workspace_pairs)
+                workspace_descendants_correct, _ = WorkspaceRelationChecker.check_workspace_descendants(
+                    workspace_pairs
+                )
                 response = {
                     "org_id": workspace.tenant.org_id,
                     "workspace_id": workspace_uuid,
@@ -2199,8 +2208,9 @@ def send_kafka_test_message(request):
         return HttpResponse("Kafka is not enabled", status=400)
 
     try:
-        from core.kafka import RBACProducer
         import uuid
+
+        from core.kafka import RBACProducer
 
         # Create sample test data
         relations_to_add = [
@@ -2691,6 +2701,44 @@ def replicate_default_workspaces(request):
 
 
 @require_http_methods(["POST"])
+def replicate_updated_workspaces(request):
+    """Replicate workspaces updated since the provided time.
+
+    POST /_private/api/utils/replicate_updated_workspaces/?since=<timestamp>&exclude_unchanged_default_workspaces=<bool>
+
+    since must be an ISO 8601 datetime string (e.g. 2026-01-01T18:00:00Z).
+
+    Returns:
+        JSON response indicating the task has been queued
+    """
+    since = request.GET["since"]
+    exclude_unchanged_default_workspaces = (
+        request.GET.get("exclude_unchanged_default_workspaces", "false").lower() == "true"
+    )
+
+    try:
+        datetime.datetime.fromisoformat(since)
+    except ValueError as e:
+        return JsonResponse({"field": "since", "detail": f"invalid datetime: {str(e)}"}, status=400)
+
+    try:
+        replicate_updated_workspaces_in_worker.delay(
+            since=since, exclude_unchanged_default_workspaces=exclude_unchanged_default_workspaces
+        )
+        return JsonResponse(
+            {
+                "message": "Replication enqueued in background worker.",
+                "since": since,
+                "exclude_unchanged_default_workspaces": exclude_unchanged_default_workspaces,
+            },
+            status=202,
+        )
+    except Exception as e:
+        logger.exception("Error replicating updated workspaces", exc_info=True)
+        return JsonResponse({"detail": f"Error replicating updated workspaces: {str(e)}"}, status=500)
+
+
+@require_http_methods(["POST"])
 def recompute_tenant_role_bindings(request, org_id):
     """
     Recompute all role bindings for a tenant.
@@ -2712,6 +2760,35 @@ def recompute_tenant_role_bindings(request, org_id):
         logger.exception(f"Error recomputing role bindings for tenant {org_id}")
         return JsonResponse(
             {"detail": f"Error recomputing role bindings for tenant: {str(e)}"},
+            status=500,
+        )
+
+
+@require_http_methods(["POST"])
+def migrate_role_scope_if_changed(request, role_uuid):
+    """
+    Migrate existing role bindings for a role if its scope has changed.
+
+    POST /_private/api/utils/migrate_role_scope_if_changed/<role_uuid>/
+
+    Returns:
+        JSON response indicating the task has been queued
+    """
+    try:
+        parsed_uuid = uuid.UUID(role_uuid)
+    except ValueError:
+        return JsonResponse({"message": f"invalid UUID: {role_uuid}"}, status=400)
+
+    if not Role.objects.public_tenant_only().filter(uuid=role_uuid, system=True).exists():
+        return JsonResponse({"message": f"role does not exist; UUID: {str(parsed_uuid)}"}, status=404)
+
+    try:
+        migrate_role_scope_if_changed_in_worker.delay(role_uuid=str(parsed_uuid))
+        return JsonResponse({"message": "Job enqueued in background worker."}, status=202)
+    except Exception as e:
+        logger.exception(f"Error migrating scope for role {parsed_uuid}")
+        return JsonResponse(
+            {"detail": f"Error migrating scope for role: {str(e)}"},
             status=500,
         )
 
