@@ -73,6 +73,40 @@ def _workspace_list_cache_key(ws_type: str, offset: str, limit: str, order_by: s
     return f"list::{ws_type}::{offset}::{limit}::{order_by}"
 
 
+# Valid ordering fields for workspace list — used to sanitize cache keys.
+_WORKSPACE_ORDERING_FIELDS = frozenset(("name", "created", "modified", "type"))
+
+
+def _normalize_cache_params(query_params, max_limit: int = 3000):
+    """Normalize and validate pagination/ordering params for cache key construction.
+
+    Ensures cache keys match the actual paginated response regardless of raw input:
+    - offset: non-negative integer, default 0
+    - limit: positive integer clamped to [1, max_limit], default 10
+    - order_by: must be a recognised field (with optional '-' prefix), default 'name'
+
+    This prevents cache pollution from arbitrary strings and avoids key/content
+    mismatches when the paginator clamps values differently from the raw input.
+    """
+    try:
+        offset = max(0, int(query_params.get("offset", "0")))
+    except (ValueError, TypeError):
+        offset = 0
+
+    try:
+        limit = int(query_params.get("limit", "10"))
+        limit = max(1, min(limit, max_limit))
+    except (ValueError, TypeError):
+        limit = 10
+
+    order_by = query_params.get("order_by", "name")
+    field = order_by.lstrip("-")
+    if field not in _WORKSPACE_ORDERING_FIELDS:
+        order_by = "name"
+
+    return str(offset), str(limit), order_by
+
+
 def _get_cached_response(org_id: str, key: str):
     """Return a cached workspace API response or None."""
     return WORKSPACE_CACHE.get_response(org_id, key)
@@ -296,9 +330,7 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
 
         cache_key = None
         if org_id and cacheable_type:
-            offset = self.request.query_params.get("offset", "0")
-            limit = self.request.query_params.get("limit", "10")
-            order_by = self.request.query_params.get("order_by", "name")
+            offset, limit, order_by = _normalize_cache_params(self.request.query_params, self.pagination_class.max_limit)
             cache_key = _workspace_list_cache_key(cacheable_type, offset, limit, order_by)
             cached = _get_cached_response(org_id, cache_key)
             if cached is not None:
@@ -368,6 +400,10 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
         Invalidates workspace cache for built-in types (default) to prevent
         serving stale data. ROOT workspaces are blocked at the service layer,
         but we guard both types defensively.
+
+        Cache invalidation is deferred via transaction.on_commit() so it only
+        fires after the DB transaction commits, avoiding the race where a
+        concurrent reader re-populates the cache with pre-commit data.
         """
         instance = serializer.instance
         audit_log = AuditLog()
@@ -380,7 +416,7 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
         if instance.type in (Workspace.Types.ROOT, Workspace.Types.DEFAULT):
             org_id = self._get_org_id(self.request)
             if org_id:
-                WORKSPACE_CACHE.delete_workspaces_for_tenant(org_id)
+                transaction.on_commit(lambda: WORKSPACE_CACHE.delete_workspaces_for_tenant(org_id))
 
     @transaction.atomic()
     def update(self, request, *args, **kwargs):

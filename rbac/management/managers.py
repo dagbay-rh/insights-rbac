@@ -44,8 +44,12 @@ class WorkspaceManager(models.Manager):
         return tenant_id
 
     @staticmethod
-    def _resolve_org_id(tenant=None):
-        """Resolve org_id from a tenant object for cache lookup."""
+    def _resolve_org_id(tenant=None) -> str | None:
+        """Resolve org_id from a tenant object for cache lookup.
+
+        Returns None when tenant is None, has no org_id attribute, or
+        org_id is falsy (e.g. empty string).
+        """
         return getattr(tenant, "org_id", None) or None
 
     def get_queryset(self):

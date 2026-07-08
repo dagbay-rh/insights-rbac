@@ -227,6 +227,31 @@ class WorkspaceManagerCacheTests(IdentityRequest):
             self.assertEqual(result.id, self.root_workspace.id)
             mock_get.assert_not_called()
 
+    def test_root_with_tenant_none_org_id_skips_cache(self):
+        """When tenant.org_id is None, cache is skipped and DB is used directly."""
+        original_org_id = self.tenant.org_id
+        self.tenant.org_id = None
+        try:
+            with patch.object(WorkspaceCache, "get_workspace") as mock_get:
+                with patch.object(WorkspaceCache, "cache_workspace") as mock_cache:
+                    result = Workspace.objects.root(tenant=self.tenant)
+                    self.assertEqual(result.id, self.root_workspace.id)
+                    mock_get.assert_not_called()
+                    mock_cache.assert_not_called()
+        finally:
+            self.tenant.org_id = original_org_id
+
+    @patch.object(WorkspaceCache, "get_workspace", return_value=None)
+    def test_root_cache_miss_does_not_exist(self, mock_get_ws):
+        """On cache miss when workspace doesn't exist in DB, DoesNotExist is raised."""
+        # Use a fake tenant with org_id so cache path is exercised,
+        # but a non-existent tenant_id so DB lookup fails.
+        fake_tenant = MagicMock()
+        fake_tenant.org_id = "nonexistent-org"
+        fake_tenant.id = 99999
+        with self.assertRaises(Workspace.DoesNotExist):
+            Workspace.objects.root(tenant=fake_tenant)
+
 
 @override_settings(ATOMIC_RETRY_DISABLED=True, V2_APIS_ENABLED=True)
 class WorkspaceCacheInvalidationTests(IdentityRequest):
@@ -255,6 +280,48 @@ class WorkspaceCacheInvalidationTests(IdentityRequest):
 
         delete_tenant_with_resources(self.tenant)
         mock_delete.assert_called_once_with(self.tenant.org_id)
+
+
+@override_settings(ATOMIC_RETRY_DISABLED=True, V2_APIS_ENABLED=True)
+class WorkspaceCacheBootstrapTests(IdentityRequest):
+    """Tests for workspace cache invalidation during bootstrap."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        reload(urls)
+        clear_url_caches()
+        super().setUp()
+
+    def tearDown(self):
+        """Clean up."""
+        Workspace.objects.update(parent=None)
+        Workspace.objects.all().delete()
+
+    @patch.object(WorkspaceCache, "delete_workspaces_for_tenant")
+    def test_bootstrap_tenants_invalidates_cache(self, mock_delete):
+        """_bootstrap_tenants_no_replicate invalidates workspace cache for each tenant."""
+        from api.models import Tenant
+        from management.tenant_service.v2 import V2TenantBootstrapService
+        from migration_tool.in_memory_tuples import InMemoryRelationReplicator
+
+        new_tenant = Tenant.objects.create(
+            tenant_name="test_bootstrap_cache",
+            org_id="bootstrap-cache-test-org",
+        )
+        try:
+            service = V2TenantBootstrapService(replicator=InMemoryRelationReplicator())
+            service._bootstrap_tenants_no_replicate([new_tenant])
+            mock_delete.assert_any_call(new_tenant.org_id)
+        finally:
+            Workspace.objects.filter(tenant=new_tenant).update(parent=None)
+            Workspace.objects.filter(tenant=new_tenant).delete()
+            new_tenant.delete()
+
+    def test_delete_workspaces_for_tenant_mocked_redis_noop(self):
+        """delete_workspaces_for_tenant is a no-op when Redis is mocked."""
+        cache = WorkspaceCache()
+        cache._redis_mocked = True
+        cache.delete_workspaces_for_tenant("org123")
 
 
 @override_settings(ATOMIC_RETRY_DISABLED=True, V2_APIS_ENABLED=True)
@@ -457,6 +524,50 @@ class WorkspaceViewCacheTests(IdentityRequest):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         mock_get.assert_called_once_with(self.tenant.org_id, "list::root::0::10::-name")
+
+    @patch.object(WorkspaceCache, "cache_response")
+    @patch.object(WorkspaceCache, "get_response", return_value=None)
+    def test_list_excessive_limit_clamped_in_cache_key(self, mock_get, mock_cache):
+        """Limit exceeding max_limit is clamped in the cache key to prevent key mismatch."""
+        url = "{}?type=root&limit=99999".format(reverse("v2_management:workspace-list"))
+        response = self.client.get(url, **self.headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        # WorkspacePagination.max_limit = 3000, so limit is clamped
+        mock_get.assert_called_once_with(self.tenant.org_id, "list::root::0::3000::name")
+
+    @patch.object(WorkspaceCache, "cache_response")
+    @patch.object(WorkspaceCache, "get_response", return_value=None)
+    def test_list_invalid_order_by_normalised_in_cache_key(self, mock_get, mock_cache):
+        """Invalid order_by values are normalised in the cache key to prevent pollution."""
+        url = "{}?type=root&order_by=invalid_field".format(reverse("v2_management:workspace-list"))
+        response = self.client.get(url, **self.headers)
+
+        # ValidatedOrderingFilter rejects the invalid field, but cache lookup
+        # already happened with the normalised key — preventing cache pollution.
+        mock_get.assert_called_once_with(self.tenant.org_id, "list::root::0::10::name")
+        # Response may be 400 (from ordering filter) — cache was not populated
+        mock_cache.assert_not_called()
+
+    @patch.object(WorkspaceCache, "cache_response")
+    @patch.object(WorkspaceCache, "get_response", return_value=None)
+    def test_list_non_numeric_offset_defaults_to_zero(self, mock_get, mock_cache):
+        """Non-numeric offset values default to 0 in the cache key."""
+        url = "{}?type=root&offset=abc".format(reverse("v2_management:workspace-list"))
+        response = self.client.get(url, **self.headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_get.assert_called_once_with(self.tenant.org_id, "list::root::0::10::name")
+
+    @patch.object(WorkspaceCache, "cache_response")
+    @patch.object(WorkspaceCache, "get_response", return_value=None)
+    def test_list_negative_offset_clamped_to_zero(self, mock_get, mock_cache):
+        """Negative offset values are clamped to 0 in the cache key."""
+        url = "{}?type=root&offset=-5".format(reverse("v2_management:workspace-list"))
+        response = self.client.get(url, **self.headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_get.assert_called_once_with(self.tenant.org_id, "list::root::0::10::name")
 
 
 @override_settings(ATOMIC_RETRY_DISABLED=True, V2_APIS_ENABLED=True)
