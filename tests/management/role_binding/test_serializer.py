@@ -22,7 +22,16 @@ from unittest.mock import Mock, patch
 
 from django.test import TestCase, override_settings
 
-from management.models import Group, Permission, Principal, RoleBinding, RoleBindingGroup, RoleV2, Workspace
+from management.models import (
+    Group,
+    Permission,
+    Principal,
+    RoleBinding,
+    RoleBindingGroup,
+    RoleBindingPrincipal,
+    RoleV2,
+    Workspace,
+)
 from management.role.v2_service import RoleV2Service
 from management.role_binding.serializer import (
     BatchCreateRoleBindingRequestSerializer,
@@ -1361,7 +1370,7 @@ class RoleBindingListOutputSerializerTest(IdentityRequest):
 
     Tests verify the serializer produces output matching the API spec:
     - role: {id: UUID, name?: string}
-    - subject: {id?: UUID, type: "group", group?: {name, description, user_count}}
+    - subject: {id: UUID, type: "group"|"user", group?: {name, description, user_count}}
     - resource: {id: string, type?: string}
 
     Uses subTest for parametrized field selection coverage.
@@ -1513,7 +1522,7 @@ class RoleBindingListOutputSerializerTest(IdentityRequest):
                 lambda d: (
                     "group" in d["subject"]
                     and d["subject"]["group"]["name"] == "test_group"
-                    and "id" not in d["subject"]  # id excluded when not requested
+                    and "id" in d["subject"]  # id always included
                 ),
             ),
             (
@@ -1551,13 +1560,73 @@ class RoleBindingListOutputSerializerTest(IdentityRequest):
         self.assertEqual(data["role"]["id"], self.role.uuid)
         self.assertEqual(data["role"]["name"], "test_role")
 
-        # Subject includes type (always) + group.name, but not id
+        # Subject includes type and id (always) + group.name
         self.assertEqual(data["subject"]["type"], "group")
-        self.assertNotIn("id", data["subject"])
+        self.assertIn("id", data["subject"])
         self.assertEqual(data["subject"]["group"]["name"], "test_group")
 
         # Resource includes id (always) + type
         self.assertEqual(data["resource"]["id"], "ws-12345")
+        self.assertEqual(data["resource"]["type"], "workspace")
+
+    def test_subject_id_always_present_with_unrelated_field_selection(self):
+        """Regression: subject.id must be present even when fields param only requests role(name).
+
+        See RHCLOUD-48118: requesting fields=role(name) omitted subject.id from the response.
+        The minimum response structure must always include subject(id, type).
+        """
+        fs = RoleBindingFieldSelection.parse("role(name)")
+        data = self._serialize(self.binding, field_selection=fs)
+
+        # subject.id and subject.type must always be present
+        self.assertIn("id", data["subject"])
+        self.assertEqual(data["subject"]["type"], "group")
+        # role includes requested name + always-present id
+        self.assertEqual(data["role"]["name"], "test_role")
+        self.assertIn("id", data["role"])
+
+    def test_subject_id_always_present_for_user_with_unrelated_field_selection(self):
+        """Regression: subject.id must be present for user subjects when fields=role(name).
+
+        Companion to test_subject_id_always_present_with_unrelated_field_selection
+        which covers group subjects. See RHCLOUD-48118.
+        """
+        # Use a separate binding with only a principal entry (no group)
+        user_binding = RoleBinding.objects.create(
+            role=self.role,
+            resource_type="workspace",
+            resource_id="ws-user-1",
+            tenant=self.tenant,
+        )
+        RoleBindingPrincipal.objects.create(
+            principal=self.principal,
+            binding=user_binding,
+            source="direct",
+        )
+        try:
+            fs = RoleBindingFieldSelection.parse("role(name)")
+            data = self._serialize(user_binding, field_selection=fs)
+
+            self.assertIn("id", data["subject"])
+            self.assertEqual(data["subject"]["id"], self.principal.uuid)
+            self.assertEqual(data["subject"]["type"], "user")
+            self.assertEqual(data["role"]["name"], "test_role")
+        finally:
+            user_binding.delete()
+
+    def test_subject_id_always_present_with_resource_only_field_selection(self):
+        """Regression: subject.id must be present even when fields only mention resource.
+
+        Verifies the fix for RHCLOUD-48118 with fields=resource(type) — subject is not
+        mentioned in the field selection at all, but subject.id and subject.type must
+        still appear in the response.
+        """
+        fs = RoleBindingFieldSelection.parse("resource(type)")
+        data = self._serialize(self.binding, field_selection=fs)
+
+        self.assertIn("id", data["subject"])
+        self.assertEqual(data["subject"]["id"], self.group.uuid)
+        self.assertEqual(data["subject"]["type"], "group")
         self.assertEqual(data["resource"]["type"], "workspace")
 
     def test_field_selection_resource_name(self):
@@ -2342,17 +2411,17 @@ class UpdateRoleBindingResponseSerializerTests(IdentityRequest):
 
         self.assertEqual(data, {"subject": {"id": self.group.uuid, "type": "group"}})
 
-    def test_field_selection_subject_without_id(self):
-        """When only subject(group.name) is requested, type plus group details appear."""
+    def test_field_selection_subject_id_always_included_when_not_explicitly_requested(self):
+        """subject.id is always present even when field selection only requests subject(group.name)."""
         result = self._make_group_result()
         field_selection = RoleBindingBySubjectFieldSelection(nested_fields={"subject": {"group.name"}})
         serializer = UpdateRoleBindingResponseSerializer(result, context={"field_selection": field_selection})
         data = serializer.data
 
-        self.assertEqual(data, {"subject": {"type": "group", "group": {"name": "test_group"}}})
+        self.assertEqual(data, {"subject": {"type": "group", "id": self.group.uuid, "group": {"name": "test_group"}}})
 
     def test_field_selection_group_details(self):
-        """Requesting subject(group.name,group.description,group.user_count) returns only those."""
+        """Requesting subject(group.name,group.description,group.user_count) returns id, type, plus those."""
         self.group.principalCount = 3
         result = self._make_group_result()
         field_selection = RoleBindingBySubjectFieldSelection(
@@ -2366,6 +2435,7 @@ class UpdateRoleBindingResponseSerializerTests(IdentityRequest):
             {
                 "subject": {
                     "type": "group",
+                    "id": self.group.uuid,
                     "group": {"name": "test_group", "description": "A test group", "user_count": 3},
                 }
             },
@@ -2499,14 +2569,14 @@ class RoleBindingUserSubjectSerializerTest(IdentityRequest):
         self.assertIn("user", result)
         self.assertEqual(result["user"]["username"], "testuser")
 
-    def test_subject_excludes_id_when_not_requested_with_field_selection(self):
-        """Test that id is excluded when field selection doesn't include it."""
+    def test_subject_always_includes_id_with_field_selection(self):
+        """Test that id is always included even when field selection doesn't explicitly request it."""
         field_selection = RoleBindingFieldSelection(nested_fields={"subject": {"user.username"}})
         serializer = RoleBindingOutputSerializer(context={"field_selection": field_selection})
         result = serializer.get_subject(self.principal)
 
         self.assertEqual(result["type"], "user")
-        self.assertNotIn("id", result)
+        self.assertEqual(result["id"], self.principal.uuid)
 
     def test_subject_returns_none_for_invalid_object(self):
         """Test get_subject with invalid object returns None."""
