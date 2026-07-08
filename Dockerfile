@@ -41,7 +41,7 @@ LABEL summary="$SUMMARY" \
 # glibc-langpack-en is needed to set locale to en_US and disable warning about it
 # gcc to compile some python packages (e.g. ciso8601)
 # postgresql-devel for psycopg2, libffi-devel for cffi
-RUN INSTALL_PKGS="glibc-langpack-en postgresql-devel postgresql gcc libffi-devel" && \
+RUN INSTALL_PKGS="glibc-langpack-en postgresql-server-devel postgresql gcc libffi-devel python3.12-devel" && \
     microdnf --nodocs -y upgrade && \
     microdnf -y --setopt=tsflags=nodocs --setopt=install_weak_deps=0 install $INSTALL_PKGS && \
     rpm -V $INSTALL_PKGS && \
@@ -69,6 +69,7 @@ WORKDIR ${APP_ROOT}
 ENV PIP_DEFAULT_TIMEOUT=100
 COPY Pipfile .
 COPY Pipfile.lock .
+ENV PG_CONFIG=/usr/bin/pg_config
 RUN \
     # install the dependencies into the working dir (i.e. ${APP_ROOT}/.venv)
     pipenv install --deploy && \
@@ -116,5 +117,22 @@ EXPOSE 8080
 # Set this at the end to leverage build caching
 ARG GIT_COMMIT=undefined
 ENV GIT_COMMIT=${GIT_COMMIT}
+
+# Runtime stage
+FROM registry.access.redhat.com/hi/python:3.12-fips
+
+ENV APP_ROOT=/opt/rbac \
+    APP_HOME=/opt/rbac/rbac \
+    VIRTUAL_ENV=/opt/rbac/.venv \
+    PATH="/opt/rbac/.venv/bin:$PATH" \
+    PROMETHEUS_MULTIPROC_DIR=/tmp \
+    LOG_DIRECTORY=/tmp
+
+WORKDIR ${APP_ROOT}
+
+COPY --from=base /opt/rbac /opt/rbac
+COPY --from=base /licenses /licenses
+
+USER 1001
 
 ENTRYPOINT ["./scripts/entrypoint.sh"]
