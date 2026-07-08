@@ -1,6 +1,7 @@
-"""Tests for logging handler deduplication logic in settings."""
+"""Tests for logging handler deduplication and propagation logic in settings."""
 
 import importlib
+import logging
 import os
 from unittest import mock
 
@@ -69,3 +70,65 @@ class TestLoggingHandlerDeduplication(SimpleTestCase):
                 f"Logger '{logger_name}' should not have 'console' when 'ecs' is also configured",
             )
             self.assertIn("ecs", handlers, f"Logger '{logger_name}' should have 'ecs' handler")
+
+
+class TestLoggerPropagationConfig(SimpleTestCase):
+    """Verify propagate=False on all app loggers prevents duplicate log output."""
+
+    def setUp(self):
+        """Load the LOGGING config from settings."""
+        from rbac.settings import LOGGING
+
+        self.logging_config = LOGGING
+
+    def test_all_app_loggers_have_propagate_false(self):
+        """Every logger with explicit handlers must have propagate=False to prevent duplicates."""
+        loggers = self.logging_config["loggers"]
+        for name, config in loggers.items():
+            self.assertFalse(
+                config.get("propagate", True),
+                f"Logger '{name}' must have propagate=False to prevent duplicate log lines",
+            )
+
+    def test_root_logger_has_handlers(self):
+        """Root logger must have handlers so unconfigured loggers still produce output."""
+        root = self.logging_config.get("root")
+        self.assertIsNotNone(root, "LOGGING must include a 'root' key")
+        self.assertTrue(len(root.get("handlers", [])) > 0, "Root logger must have at least one handler")
+
+    def test_root_logger_level_is_warning(self):
+        """Root logger should be WARNING to avoid noise from unconfigured third-party loggers."""
+        root = self.logging_config["root"]
+        self.assertEqual(root["level"], "WARNING")
+
+    def test_core_logger_is_configured(self):
+        """The 'core' namespace (kafka, kafka_dr) must have an explicit logger entry."""
+        loggers = self.logging_config["loggers"]
+        self.assertIn("core", loggers, "Missing 'core' logger — core.kafka and core.kafka_dr would fall to root")
+        self.assertFalse(loggers["core"].get("propagate", True))
+
+    def test_all_code_namespaces_have_loggers(self):
+        """Every top-level source namespace under rbac/ should have a matching logger entry."""
+        expected = {"django", "api", "internal", "rbac", "management", "core", "migration_tool", "feature_flags"}
+        configured = set(self.logging_config["loggers"].keys())
+        missing = expected - configured
+        self.assertEqual(missing, set(), f"Missing logger entries for namespaces: {missing}")
+
+    def test_propagate_false_applied_at_runtime(self):
+        """Verify propagate=False is applied to live logger objects, not just the config dict."""
+        app_loggers = ["django", "api", "internal", "rbac", "management", "core", "migration_tool", "feature_flags"]
+        for name in app_loggers:
+            live_logger = logging.getLogger(name)
+            self.assertFalse(
+                live_logger.propagate,
+                f"Logger '{name}' has propagate=True at runtime — log messages will duplicate via root handler",
+            )
+
+    def test_app_loggers_have_handlers_at_runtime(self):
+        """Each app logger must have at least one handler so logs are not silently dropped."""
+        for name in ("django", "api", "rbac", "management", "core"):
+            live_logger = logging.getLogger(name)
+            self.assertTrue(
+                len(live_logger.handlers) > 0,
+                f"Logger '{name}' has no handlers — log messages will be silently dropped",
+            )

@@ -305,6 +305,7 @@ LOGGING = {
         "internal": {"handlers": LOGGING_HANDLERS, "level": RBAC_LOGGING_LEVEL, "propagate": False},
         "rbac": {"handlers": LOGGING_HANDLERS, "level": RBAC_LOGGING_LEVEL, "propagate": False},
         "management": {"handlers": LOGGING_HANDLERS, "level": RBAC_LOGGING_LEVEL, "propagate": False},
+        "core": {"handlers": LOGGING_HANDLERS, "level": RBAC_LOGGING_LEVEL, "propagate": False},
         "migration_tool": {"handlers": LOGGING_HANDLERS, "level": RBAC_LOGGING_LEVEL, "propagate": False},
         "feature_flags": {"handlers": DEBUG_LOG_HANDLERS, "level": "DEBUG", "propagate": False},
     },
