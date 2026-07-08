@@ -103,7 +103,7 @@ def _build_role_response(role: RoleV2, field_selection: Optional[FieldSelection]
     """
     role_fields: set | None = None
     if field_selection is not None:
-        role_fields = field_selection.get_nested("role") or field_selection.get_nested("roles") or None
+        role_fields = field_selection.get_nested("role") or field_selection.get_nested("roles")
 
     if role_fields is None:
         # No field selection, or role/roles not mentioned → defaults
@@ -938,7 +938,7 @@ class BatchCreateRoleBindingRequestSerializer(serializers.Serializer):
 
     service_class = RoleBindingService
 
-    DEFAULT_FIELDS = "resource(id,type),role(id),subject(id,type)"
+    DEFAULT_FIELDS = "resource(id,type),role(id,created,modified),subject(id,type)"
 
     requests = CreateRoleBindingItemSerializer(many=True, min_length=1, max_length=100)
     fields = serializers.CharField(
@@ -1121,7 +1121,7 @@ class UpdateRoleBindingRequestSerializer(RoleBindingInputSerializerMixin, serial
         "resource.tenant.org_id": "resource_tenant_org_id",
     }
 
-    DEFAULT_FIELDS = "resource(id),subject(id,type),roles(id)"
+    DEFAULT_FIELDS = "resource(id),subject(id,type),roles(id,created,modified)"
 
     # Query parameters
     resource_id = serializers.CharField(

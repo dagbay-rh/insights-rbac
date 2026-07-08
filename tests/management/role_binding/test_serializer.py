@@ -505,7 +505,7 @@ class RoleBindingByGroupSerializerTest(IdentityRequest):
 
         Default behavior returns only basic fields:
         - subject: id, type (no group details)
-        - roles: id only (no name)
+        - roles: id, created, modified (no name)
         - resource: id only (no name, type)
         - no last_modified
         """
@@ -581,7 +581,7 @@ class RoleBindingByGroupSerializerTest(IdentityRequest):
 
         Default behavior returns only basic fields:
         - subject: id, type (no group details)
-        - roles: id only
+        - roles: id, created, modified
         - resource: id only
         - sources: id only
         - no last_modified
@@ -1554,6 +1554,7 @@ class RoleBindingListOutputSerializerTest(IdentityRequest):
 
         # Role includes id (always) plus explicitly requested fields
         self.assertIn("id", data["role"])
+        self.assertEqual(data["role"]["id"], self.role.uuid)
         self.assertEqual(data["role"]["name"], "test_role")
 
         # Subject includes type (always) + group.name, but not id
@@ -2568,6 +2569,7 @@ class RoleBindingUserSubjectSerializerTest(IdentityRequest):
         self.assertEqual(len(result), 1)
         # id is always included for consistency with subject/resource
         self.assertIn("id", result[0])
+        self.assertEqual(result[0]["id"], self.role.uuid)
         self.assertEqual(result[0]["name"], "test_role")
 
     def test_roles_deduplicates_same_role_from_multiple_bindings(self):
@@ -2605,7 +2607,7 @@ class RoleBindingUserSubjectSerializerTest(IdentityRequest):
 
         Default behavior returns only basic fields:
         - subject: id, type (no user details)
-        - roles: id only (no name)
+        - roles: id, created, modified (no name)
         - resource: id only (no name, type)
         - no last_modified
         """
