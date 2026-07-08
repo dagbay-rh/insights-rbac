@@ -209,8 +209,16 @@ objects:
             value: ${NOTIFICATIONS_RH_ENABLED}
           - name: KAFKA_ENABLED
             value: ${KAFKA_ENABLED}
-          - name: DR_RECONCILE_ENABLED
-            value: ${DR_RECONCILE_ENABLED}
+          - name: DR_RELATIONS_RECONCILE_ENABLED
+            value: ${DR_RELATIONS_RECONCILE_ENABLED}
+          - name: DR_WORKSPACE_RECONCILE_ENABLED
+            value: ${DR_WORKSPACE_RECONCILE_ENABLED}
+          - name: RBAC_KAFKA_CONSUMER_TOPIC
+            value: ${RBAC_KAFKA_CONSUMER_TOPIC}
+          - name: DR_KAFKA_CONSUMER_GROUP_ID
+            value: ${DR_KAFKA_CONSUMER_GROUP_ID}
+          - name: CELERY_WORKER_CONCURRENCY
+            value: ${CELERY_WORKER_CONCURRENCY}
           - name: NOTIFICATIONS_TOPIC
             value: ${NOTIFICATIONS_TOPIC}
           - name: EXTERNAL_SYNC_TOPIC
@@ -245,6 +253,8 @@ objects:
             value: ${REDHAT_SSO}
           - name: REPLICATION_TO_RELATION_ENABLED
             value: ${REPLICATION_TO_RELATION_ENABLED}
+          - name: EPH_ENV
+            value: ${EPH_ENV}
           - name: PRINCIPAL_CLEANUP_UPDATE_ENABLED_UMB
             value: ${PRINCIPAL_CLEANUP_UPDATE_ENABLED_UMB}
           - name: V2_MIGRATION_APP_EXCLUDE_LIST
@@ -535,8 +545,12 @@ objects:
             value: ${NOTIFICATIONS_RH_ENABLED}
           - name: KAFKA_ENABLED
             value: ${KAFKA_ENABLED}
-          - name: DR_RECONCILE_ENABLED
-            value: ${DR_RECONCILE_ENABLED}
+          - name: DR_RELATIONS_RECONCILE_ENABLED
+            value: ${DR_RELATIONS_RECONCILE_ENABLED}
+          - name: DR_WORKSPACE_RECONCILE_ENABLED
+            value: ${DR_WORKSPACE_RECONCILE_ENABLED}
+          - name: CELERY_WORKER_CONCURRENCY
+            value: ${CELERY_WORKER_CONCURRENCY}
           - name: NOTIFICATIONS_TOPIC
             value: ${NOTIFICATIONS_TOPIC}
           - name: EXTERNAL_SYNC_TOPIC
@@ -553,6 +567,8 @@ objects:
             value: ${SA_NAME}
           - name: REPLICATION_TO_RELATION_ENABLED
             value: ${REPLICATION_TO_RELATION_ENABLED}
+          - name: EPH_ENV
+            value: ${EPH_ENV}
           - name: PRINCIPAL_CLEANUP_UPDATE_ENABLED_UMB
             value: ${PRINCIPAL_CLEANUP_UPDATE_ENABLED_UMB}
           - name: V2_MIGRATION_APP_EXCLUDE_LIST
@@ -661,6 +677,8 @@ objects:
             value: ${IT_BYPASS_PERMISSIONS_MODIFY_SERVICE_ACCOUNTS}
           - name: IT_BYPASS_TOKEN_VALIDATION
             value: ${IT_BYPASS_TOKEN_VALIDATION}
+          - name: IT_BYPASS_SYSTEM_USER_ID
+            value: ${IT_BYPASS_SYSTEM_USER_ID}
           - name: IT_SERVICE_BASE_PATH
             value: ${IT_SERVICE_BASE_PATH}
           - name: IT_SERVICE_HOST
@@ -771,6 +789,8 @@ objects:
             value: ${RBAC_KAFKA_CUSTOM_CONSUMER_BROKER}
           - name: REPLICATION_TO_RELATION_ENABLED
             value: ${REPLICATION_TO_RELATION_ENABLED}
+          - name: EPH_ENV
+            value: ${EPH_ENV}
           - name: RELATION_API_SERVER
             value: ${RELATION_API_SERVER}
           # Relations API variables
@@ -825,6 +845,65 @@ objects:
           requests:
             cpu: ${RBAC_KAFKA_CONSUMER_CPU_REQUEST}
             memory: ${RBAC_KAFKA_CONSUMER_MEMORY_REQUEST}
+
+    - name: rbac-postgres-exporter
+      minReplicas: ${{MIN_POSTGRES_EXPORTER_REPLICAS}}
+      podSpec:
+        image: ${POSTGRES_EXPORTER_IMAGE}
+        args:
+        - "--extend.query-path=/etc/config.yaml"
+        env:
+        - name: DATABASE_HOST
+          valueFrom:
+            secretKeyRef:
+              key: host
+              name: db-clone
+              optional: false
+        - name: DATABASE_PORT
+          valueFrom:
+            secretKeyRef:
+              key: port
+              name: db-clone
+              optional: false
+        - name: DATABASE_NAME
+          valueFrom:
+            secretKeyRef:
+              key: db
+              name: db-clone
+              optional: false
+        - name: DATA_SOURCE_URI
+          value: "$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)?sslmode=${PGSSLMODE}"
+        - name: DATA_SOURCE_USER
+          valueFrom:
+            secretKeyRef:
+              key: user
+              name: db-clone
+              optional: false
+        - name: DATA_SOURCE_PASS
+          valueFrom:
+            secretKeyRef:
+              key: pass
+              name: db-clone
+              optional: false
+        volumes:
+        - name: postgres-exporter-queries
+          configMap:
+            name: rbac-postgres-exporter-queries
+            optional: true
+        volumeMounts:
+        - name: postgres-exporter-queries
+          mountPath: /etc/config.yaml
+          subPath: queries.yaml
+        resources:
+          requests:
+            cpu: ${POSTGRES_EXPORTER_CPU_REQUEST}
+            memory: ${POSTGRES_EXPORTER_MEMORY_REQUEST}
+          limits:
+            cpu: ${POSTGRES_EXPORTER_CPU_LIMIT}
+            memory: ${POSTGRES_EXPORTER_MEMORY_LIMIT}
+      webServices:
+        metrics:
+          enabled: true
 
     jobs:
       - name: user-id-populator
@@ -1352,7 +1431,7 @@ objects:
     name: system-users
   data:
     system-users.json: >-
-      ewogICAgImluc2VydF9zdWJfaGVyZSI6IHsKICAgICAgICAiYWRtaW4iOiB0cnVlLAogICAgICAgICJpc19zZXJ2aWNlX2FjY291bnQiOiB0cnVlLAogICAgICAgICJhbGxvd19hbnlfb3JnIjogdHJ1ZQogICAgfQp9Cg==
+      ewogICAgIm1vY2tlZC11c2VyLWlkLWJlY2F1c2UtdG9rZW4tdmFsaWRhdGlvbi1pcy1kaXNhYmxlZCI6IHsKICAgICAgICAiYWRtaW4iOiB0cnVlLAogICAgICAgICJpc19zZXJ2aWNlX2FjY291bnQiOiB0cnVlLAogICAgICAgICJhbGxvd19hbnlfb3JnIjogdHJ1ZQogICAgfQp9Cg==
   type: Opaque
 - apiVersion: v1
   kind: Secret
@@ -1401,6 +1480,20 @@ objects:
       requests:
         storage: 2Gi
 
+- apiVersion: v1
+  kind: Service
+  metadata:
+    name: rbac-postgres-exporter
+    labels:
+      app: rbac-postgres-exporter
+  spec:
+    ports:
+    - name: 9187-tcp
+      port: 9187
+      targetPort: 9187
+    selector:
+      pod: rbac-postgres-exporter
+    type: ClusterIP
 parameters:
 - description: Image name
   name: IMAGE
@@ -1562,6 +1655,10 @@ parameters:
   displayName: Memory Limit
   name: CELERY_WORKER_MEMORY_LIMIT
   value: 512Mi
+- description: Number of concurrent Celery worker processes. 0 uses Celery default (CPU count).
+  displayName: Celery Worker Concurrency
+  name: CELERY_WORKER_CONCURRENCY
+  value: "0"
 - description: Initial amount of CPU the init worker container will request.
   displayName: RBAC worker init container CPU Resource Request
   name: INIT_WORKER_CPU_REQUEST
@@ -1636,8 +1733,14 @@ parameters:
   name: KAFKA_ENABLED
   value: 'False'
 - description: Enable disaster recovery reconciliation endpoint and Celery task
-  name: DR_RECONCILE_ENABLED
+  name: DR_RELATIONS_RECONCILE_ENABLED
   value: 'False'
+- description: Enable disaster recovery workspace recovery endpoint and Celery task
+  name: DR_WORKSPACE_RECONCILE_ENABLED
+  value: 'False'
+- description: Kafka consumer group ID for DR reconciliation reader
+  name: DR_KAFKA_CONSUMER_GROUP_ID
+  value: 'rbac-dr-consumer-group'
 - name: EXTERNAL_SYNC_TOPIC
   value: 'platform.rbac.sync'
 - name: EXTERNAL_CHROME_TOPIC
@@ -1659,6 +1762,11 @@ parameters:
 - name: IT_BYPASS_TOKEN_VALIDATION
   description: Bypass validating the token that the user must provide in the Authorization header for making IT calls?
   value: 'False'
+- name: IT_BYPASS_SYSTEM_USER_ID
+  description: >
+    System user ID used when IT_BYPASS_TOKEN_VALIDATION is enabled.
+    Must match a key in the SYSTEM_USERS secret for s2s auth to succeed.
+  value: 'mocked-user-id-because-token-validation-is-disabled'
 - name: IT_SERVICE_BASE_PATH
   description: Path of the IT service's API
   value: '/auth/realms/redhat-external/apis'
@@ -1726,6 +1834,9 @@ parameters:
 - name: REPLICATION_TO_RELATION_ENABLED
   description: Enable replication to Relation API
   value: "True"
+- name: EPH_ENV
+  description: Flag indicating deployment is in an ephemeral environment
+  value: 'False'
 - name: MCP_ENABLED
   description: Flag to enable the MCP (Model Context Protocol) agent-to-service endpoint. Set to False to fully disable the MCP server.
   value: 'False'
@@ -1864,3 +1975,21 @@ parameters:
 - name: PARITY_CHECK_PRINCIPAL_SAMPLE_SIZE
   description: Max principals per tenant
   value: '50'
+- name: MIN_POSTGRES_EXPORTER_REPLICAS
+  description: Minimum replicas for postgres-exporter
+  value: '0'
+- name: POSTGRES_EXPORTER_IMAGE
+  description: Postgres exporter image
+  value: quay.io/prometheuscommunity/postgres-exporter:v0.19.1
+- name: POSTGRES_EXPORTER_CPU_REQUEST
+  description: Postgres exporter CPU request
+  value: 1m
+- name: POSTGRES_EXPORTER_MEMORY_REQUEST
+  description: Postgres exporter memory request
+  value: 16Mi
+- name: POSTGRES_EXPORTER_CPU_LIMIT
+  description: Postgres exporter CPU limit
+  value: 100m
+- name: POSTGRES_EXPORTER_MEMORY_LIMIT
+  description: Postgres exporter memory limit
+  value: 64Mi

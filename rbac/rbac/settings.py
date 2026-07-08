@@ -430,6 +430,9 @@ else:
     CACHES = {"default": _cache_config}
 
 CELERY_BROKER_URL = ENVIRONMENT.get_value("CELERY_BROKER_URL", default=DEFAULT_REDIS_URL)
+_celery_concurrency = ENVIRONMENT.int("CELERY_WORKER_CONCURRENCY", default=0)
+if _celery_concurrency > 0:
+    CELERY_WORKER_CONCURRENCY = _celery_concurrency
 
 if REDIS_SSL:
     _celery_ssl_conf = {"ssl_cert_reqs": REDIS_SSL_CERT_REQS}
@@ -442,6 +445,7 @@ ROLE_CREATE_ALLOW_LIST = ENVIRONMENT.get_value("ROLE_CREATE_ALLOW_LIST", default
 
 # Dual write migration configuration
 REPLICATION_TO_RELATION_ENABLED = ENVIRONMENT.bool("REPLICATION_TO_RELATION_ENABLED", default=False)
+EPH_ENV = ENVIRONMENT.bool("EPH_ENV", default=False)
 V2_MIGRATION_APP_EXCLUDE_LIST = ENVIRONMENT.get_value("V2_MIGRATION_APP_EXCLUDE_LIST", default="").split(",")
 V2_BOOTSTRAP_TENANT = ENVIRONMENT.bool("V2_BOOTSTRAP_TENANT", default=False)
 
@@ -579,6 +583,9 @@ IT_BYPASS_PERMISSIONS_MODIFY_SERVICE_ACCOUNTS = ENVIRONMENT.bool(
 )
 IT_BYPASS_IT_CALLS = ENVIRONMENT.bool("IT_BYPASS_IT_CALLS", default=False)
 IT_BYPASS_TOKEN_VALIDATION = ENVIRONMENT.bool("IT_BYPASS_TOKEN_VALIDATION", default=False)
+IT_BYPASS_SYSTEM_USER_ID = ENVIRONMENT.get_value(
+    "IT_BYPASS_SYSTEM_USER_ID", default="mocked-user-id-because-token-validation-is-disabled"
+)
 IT_SERVICE_BASE_PATH = ENVIRONMENT.get_value("IT_SERVICE_BASE_PATH", default="/auth/realms/redhat-external/apis")
 IT_SERVICE_HOST = ENVIRONMENT.get_value("IT_SERVICE_HOST", default="localhost")
 IT_SERVICE_PORT = ENVIRONMENT.int("IT_SERVICE_PORT", default="443")
@@ -683,6 +690,11 @@ ROOT_SCOPE_PERMISSIONS = ENVIRONMENT.get_value("ROOT_SCOPE_PERMISSIONS", default
 TENANT_SCOPE_PERMISSIONS = ENVIRONMENT.get_value("TENANT_SCOPE_PERMISSIONS", default="")
 DEFAULT_SCOPE_PERMISSIONS = ENVIRONMENT.get_value("DEFAULT_SCOPE_PERMISSIONS", default="")
 
+# Whether to enable automatic scope migration during seeding. (This is intended to allow the migrations to be run
+# manually before enabling the automatic runs, thus preventing the migration running sequentially for all roles on the
+# first seeding run after the feature is added.)
+AUTOMATIC_SCOPE_MIGRATION_ENABLED = ENVIRONMENT.bool("AUTOMATIC_SCOPE_MIGRATION_ENABLED", default=False)
+
 # Parity check settings - background job for comparing RBAC access with Kessel PDP
 PARITY_CHECK_ENABLED = ENVIRONMENT.bool("PARITY_CHECK_ENABLED", default=False)
 PARITY_CHECK_INTERVAL_SECONDS = ENVIRONMENT.int("PARITY_CHECK_INTERVAL_SECONDS", default=300)
@@ -692,7 +704,7 @@ PARITY_CHECK_ORG_IDS = ENVIRONMENT.str("PARITY_CHECK_ORG_IDS", default="")
 PARITY_CHECK_SCHEDULE = ENVIRONMENT.str("PARITY_CHECK_SCHEDULE", default="0 0 * * *")
 
 # Disaster recovery settings
-DR_RECONCILE_ENABLED = ENVIRONMENT.bool("DR_RECONCILE_ENABLED", default=False)
+DR_RELATIONS_RECONCILE_ENABLED = ENVIRONMENT.bool("DR_RELATIONS_RECONCILE_ENABLED", default=False)
 DR_KAFKA_CONSUMER_GROUP_ID = ENVIRONMENT.get_value("DR_KAFKA_CONSUMER_GROUP_ID", default="rbac-dr-consumer-group")
 DR_MAX_EVENTS_PER_RECONCILE = ENVIRONMENT.int("DR_MAX_EVENTS_PER_RECONCILE", default=10000)
 
@@ -723,6 +735,6 @@ SYSTEM_USERS = ENVIRONMENT.json("SYSTEM_USERS", default={})
 PRINCIPAL_CACHE_LIFETIME = ENVIRONMENT.int("PRINCIPAL_CACHE_LIFETIME", default=3600)
 
 # Disaster recovery settings
-DR_RECOVERY_ENABLED = ENVIRONMENT.bool("DR_RECOVERY_ENABLED", default=False)
+DR_WORKSPACE_RECONCILE_ENABLED = ENVIRONMENT.bool("DR_WORKSPACE_RECONCILE_ENABLED", default=False)
 DR_WORKSPACE_TOPIC = ENVIRONMENT.str("DR_WORKSPACE_TOPIC", default="outbox.event.workspace")
 DR_KAFKA_CONSUMER_TIMEOUT_MS = ENVIRONMENT.int("DR_KAFKA_CONSUMER_TIMEOUT_MS", default=30000)
