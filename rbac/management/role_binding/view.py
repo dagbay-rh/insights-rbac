@@ -26,7 +26,6 @@ from management.permissions.role_binding_access import (
     RoleBindingSystemUserAccessPermission,
 )
 from management.permissions.v2_edit_api_access import V2WriteRequiresWorkspacesEnabled
-from management.role.v2_model import RoleV2
 from management.v2_mixins import AtomicOperationsMixin
 from rest_framework import status
 from rest_framework.decorators import action
@@ -47,43 +46,6 @@ from .serializer import (
 from .service import RoleBindingService
 
 logger = logging.getLogger(__name__)
-
-
-class _BindingWithRole:
-    """Proxy that presents a RoleBinding with a different role.
-
-    Used to expand platform-role bindings into per-child-role entries
-    so the list endpoint returns concrete roles instead of abstract parents.
-    """
-
-    def __init__(self, binding, role):
-        self._binding = binding
-        self.role = role
-
-    def __getattr__(self, name):
-        return getattr(self._binding, name)
-
-
-def _expand_platform_roles(bindings):
-    """Replace platform-role bindings with one entry per child role.
-
-    Non-platform bindings pass through unchanged.  Platform bindings are
-    expanded: each child role produces a separate proxy entry that shares
-    the original binding's subject/resource data but overrides the role.
-
-    Note: this runs after pagination, so the actual number of items
-    returned may slightly exceed the requested page size when platform
-    roles are expanded into multiple children.  This is acceptable
-    because platform-role bindings are few (only default bindings).
-    """
-    expanded = []
-    for binding in bindings:
-        if binding.role and binding.role.type == RoleV2.Types.PLATFORM:
-            for child in binding.role.children.all():
-                expanded.append(_BindingWithRole(binding, child))
-        else:
-            expanded.append(binding)
-    return expanded
 
 
 class RoleBindingViewSet(AtomicOperationsMixin, BaseV2ViewSet):
@@ -191,7 +153,6 @@ class RoleBindingViewSet(AtomicOperationsMixin, BaseV2ViewSet):
                 queryset = queryset.with_resource_names()
 
         page = self.paginate_queryset(queryset)
-        page = _expand_platform_roles(page)
 
         # Build context for output serializer
         context = {
@@ -290,6 +251,10 @@ class RoleBindingViewSet(AtomicOperationsMixin, BaseV2ViewSet):
         serializer = UpdateRoleBindingRequestSerializer(data=data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         result = serializer.save()
+
+        if result.custom_default_group_created is not None:
+            audit_log = AuditLog()
+            audit_log.log_create_from_object(request, AuditLog.GROUP, result.custom_default_group_created)
 
         subject_name = self._get_subject_name(result.subject, result.subject_type)
         resource_label = result.resource_name or result.resource_id

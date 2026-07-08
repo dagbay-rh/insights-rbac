@@ -206,6 +206,12 @@ model OffsetPaginationLinks {
 namespace Problems {
     enum ProblemType {
         InsufficientPermission:"http://project-kessel.org/problems/insufficient-permission",
+        Unauthenticated:"http://project-kessel.org/problems/unauthenticated",
+        NotFound:"http://project-kessel.org/problems/not-found",
+        InternalError:"http://project-kessel.org/problems/internal-error",
+        InvalidRequest:"http://project-kessel.org/problems/invalid-request",
+        AlreadyExists:"http://project-kessel.org/problems/already-exists",
+        WorkspaceNotEmpty:"http://project-kessel.org/problems/workspace-not-empty",
     }
 
     @error
@@ -229,30 +235,45 @@ namespace Problems {
         title: "You do not have permission to perform this action.";
     }
 
-    alias Problem401 = ProblemDetails<Status = 401>;
+    @error
+    model Problem401 extends ProblemDetails<Status = 401>{
+        type: ProblemType.Unauthenticated,
+        title: "Authentication credentials were not provided or are invalid.";
+    }
 
     @error
     model Problem404 extends ProblemDetails<Status = 404>{
+        type: ProblemType.NotFound,
         title: "Resource was not found",
         @example("Not found")
         detail: string
     }
 
-    alias Problem500 = ProblemDetails<Status = 500>;
+    @error
+    model Problem500 extends ProblemDetails<Status = 500>{
+        type: ProblemType.InternalError,
+        title: "Unexpected error occurred.";
+    }
 
     @error
     model Problem400 extends ProblemDetails<Status = 400>{
+        type: ProblemType.InvalidRequest,
         title: "The request payload contains invalid syntax.",
         @example("JSON parse error - Expecting value: line 1 column 1 (char 0)")
         detail: string
     }
 
-    alias Problem400AlreadyExists = ProblemDetails<Status = 400>;
+    @error
+    model Problem400AlreadyExists extends ProblemDetails<Status = 400>{
+        type: ProblemType.AlreadyExists,
+        title: "The resource already exists.";
+    }
 
-    alias CommonProblems = Problem401 | Problem403 | Problem500;
+    alias CommonProblems = Problem400 | Problem401 | Problem403 | Problem500;
 
     namespace Workspace {
         model Problem400WorkspaceNotEmpty extends Problems.ProblemDetails<Status = 400>{
+            type: ProblemType.WorkspaceNotEmpty,
             title: "Unable to delete due to workspace dependencies",
         }
     }
@@ -552,7 +573,7 @@ namespace Workspaces {
             }
       }
     )
-    @post op create(@body body: CreateWorkspaceRequest): CreateWorkspaceResponse | Problems.CommonProblems | Problems.Problem400;
+    @post op create(@body body: CreateWorkspaceRequest): CreateWorkspaceResponse | Problems.CommonProblems | Problems.Problem400AlreadyExists;
 
     @doc("Get a workspace in tenant")
     @summary("Get a workspace in tenant")
@@ -635,7 +656,7 @@ namespace Workspaces {
         @doc("Unique identification")
         @path id: UUID;
         @body body: UpdateWorkspaceRequest
-    ): UpdateWorkspaceResponse | Problems.CommonProblems | Problems.Problem400AlreadyExists ;
+    ): UpdateWorkspaceResponse | Problems.CommonProblems | Problems.Problem400AlreadyExists;
 
     @opExample(#{
         parameters: #{
@@ -663,7 +684,7 @@ namespace Workspaces {
         @doc("Unique identification")
         @path id: UUID;
         @body body: PatchWorkspaceRequest
-    ): PatchWorkspaceResponse | Problems.CommonProblems | Problems.Problem400AlreadyExists ;
+    ): PatchWorkspaceResponse | Problems.CommonProblems | Problems.Problem400AlreadyExists;
 
     @doc("Delete a workspace")
     @summary("Delete the workspace")
@@ -705,7 +726,6 @@ namespace Workspaces {
         @body body: MoveWorkspaceRequest
     ): MoveWorkspaceResponse
       | Problems.CommonProblems
-      | Problems.Problem400
       | Problems.Problem404;
 }
 
@@ -1075,7 +1095,7 @@ namespace RoleBindings {
     @post op batchCreate(
         @query fields?: FieldMask = "resource(id,type),role(id),subject(id,type)";
         @body body: BatchCreateRoleBindingsRequest;
-    ): BatchCreateRoleBindingsResponse | Problems.CommonProblems | Problems.Problem400;
+    ): BatchCreateRoleBindingsResponse | Problems.CommonProblems;
 
     @doc("Request body for updating role bindings - contains the new roles to assign")
     @example(#{
@@ -1142,7 +1162,7 @@ namespace RoleBindings {
         @body body: UpdateRoleBindingsRequest;
 
         @query fields?: FieldMask = DefaultRoleBindingBySubjectFieldMask;
-    ): ItemResponse<RoleBindingBySubject, 200> | Problems.CommonProblems | Problems.Problem400 | Problems.Problem404;
+    ): ItemResponse<RoleBindingBySubject, 200> | Problems.CommonProblems | Problems.Problem404;
 
     @example(#{
         role: #{
@@ -1392,11 +1412,17 @@ namespace Roles {
         @doc("Filter roles by the resource type (e.g. 'tenant', 'workspace'). When omitted, returns roles from all scopes.")
         @query resource_type?: string;
 
-        @doc("Filter by resource ID. Requires resource_type to be specified.")
+        @doc("Filter by resource ID. For workspace: UUID. For tenant: tenant resource ID (format: {domain}/{org_id}). Requires resource_type unless resource.tenant.org_id is provided.")
         @query resource_id?: string;
+
+        @doc("Org ID of the tenant resource to filter by. Cannot be combined with resource_id. When provided, resource_type is implicitly 'tenant'.")
+        @query("resource.tenant.org_id") resource_tenant_org_id?: string;
 
         @doc("Control which fields are included in the response to optimize payload size.")
         @query fields?: FieldMask = "id,name,description,last_modified";
+
+        @doc("Filter by permission string(s). Comma-separated exact match (e.g. 'inventory:hosts:read' or 'inventory:hosts:read,rbac:workspace:write').")
+        @query permission?: string;
 
         @doc("Sort by specified field(s), prefix with '-' for descending order. Allowed fields: name, last_modified.")
         @query order_by?: OrderBy = "name";
@@ -1444,7 +1470,7 @@ namespace Roles {
         """)
         @example("id,name,permissions_count")
         @query fields?: string = DefaultRoleFieldMask;
-    ): ItemResponse<Role, 201> | Problems.CommonProblems | Problems.Problem400;
+    ): ItemResponse<Role, 201> | Problems.CommonProblems;
 
 
 
@@ -1518,7 +1544,7 @@ namespace Roles {
 
         @doc("Control which fields are included in the response to optimize payload size.")
         @query fields?: FieldMask = DefaultRoleFieldMask;
-    ): ItemResponse<Role, 200> | Problems.CommonProblems | Problems.Problem400 | Problems.Problem404;
+    ): ItemResponse<Role, 200> | Problems.CommonProblems | Problems.Problem404;
 
     @doc("Data for request to delete multiple roles by ID.")
     model BatchDeleteRolesRequest {
@@ -1549,5 +1575,5 @@ namespace Roles {
     })
     @post op batchDelete(
         @body body: BatchDeleteRolesRequest
-    ): BatchDeleteRolesResponse | Problems.CommonProblems | Problems.Problem400 | Problems.Problem404;
+    ): BatchDeleteRolesResponse | Problems.CommonProblems | Problems.Problem404;
 }

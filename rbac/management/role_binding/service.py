@@ -76,6 +76,7 @@ class UpdateRoleBindingResult:
     resource_type: str
     subject: Group | Principal
     resource_name: Optional[str] = None
+    custom_default_group_created: Optional[Group] = None
 
 
 logger = logging.getLogger(__name__)
@@ -211,8 +212,11 @@ class RoleBindingService:
 
         # Handle edge case: exclude_direct but no inherited bindings available
         if exclude_direct and binding_uuids is None:
-            # Relations API failed or not configured — cannot determine inherited bindings
-            return RoleBinding.objects.for_tenant(self.tenant).none()
+            # Relations API failed or not configured — cannot determine inherited bindings.
+            # We still call .with_expanded_platform_roles() before .none() because
+            # CursorPagination validates ordering fields via .order_by() even on empty
+            # querysets, so the ``effective_role_created`` annotation must exist.
+            return RoleBinding.objects.for_tenant(self.tenant).with_expanded_platform_roles().none()
 
         queryset = RoleBinding.objects.for_tenant(self.tenant)
 
@@ -244,6 +248,10 @@ class RoleBindingService:
                 resource_type=resource_type,
                 resource_id=str(resource_id) if resource_id else None,
             )
+
+        # Expand platform-role bindings into per-child-role rows at the DB level
+        # so that pagination (limit/offset) operates on the expanded count.
+        queryset = queryset.with_expanded_platform_roles()
 
         return queryset
 
@@ -946,7 +954,7 @@ class RoleBindingService:
         except Exception as e:
             logger.error(f"Failed to restore default bindings for tenant {self.tenant.org_id}: {e}")
 
-    def _maybe_customize_default_group(self, subject: Subject) -> Subject:
+    def _maybe_customize_default_group(self, subject: Subject) -> tuple[Subject, Optional[Group]]:
         """If subject is the public tenant's default access group, customize it for this tenant.
 
         When modifying role bindings for the public tenant's system default access group,
@@ -956,9 +964,13 @@ class RoleBindingService:
         If the tenant already has a custom default group, returns that instead.
 
         Returns the original subject unchanged when it is not the public default group.
+
+        Returns:
+            A tuple of (subject, created_group). created_group is the newly created custom
+            default group if one was created, or None otherwise.
         """
         if not subject.is_group:
-            return subject
+            return subject, None
         group = subject.entity
         if group.admin_default:
             raise InvalidFieldError(
@@ -966,11 +978,11 @@ class RoleBindingService:
                 "Role bindings for the admin default group cannot be modified.",
             )
         if not (group.platform_default and group.system):
-            return subject
+            return subject, None
 
         existing_custom = Group.objects.filter(platform_default=True, tenant=self.tenant).first()
         if existing_custom is not None:
-            return Subject(type=SubjectType.GROUP, entity=existing_custom)
+            return Subject(type=SubjectType.GROUP, entity=existing_custom), None
 
         from management.group.definer import clone_default_group_in_public_schema
 
@@ -978,7 +990,7 @@ class RoleBindingService:
         if custom_group is None:
             raise RuntimeError(f"Failed to create custom default access group for tenant {self.tenant.org_id}")
 
-        return Subject(type=SubjectType.GROUP, entity=custom_group)
+        return Subject(type=SubjectType.GROUP, entity=custom_group), custom_group
 
     @atomic
     def update_role_bindings_for_subject(
@@ -1021,7 +1033,7 @@ class RoleBindingService:
 
         subject = Subject.objects.by_type(type=subject_type, id=subject_id)
 
-        subject = self._maybe_customize_default_group(subject)
+        subject, created_custom_group = self._maybe_customize_default_group(subject)
 
         self._validate_subject(subject.entity)
 
@@ -1039,6 +1051,7 @@ class RoleBindingService:
             resource_type=resource_type,
             subject=subject.entity,
             resource_name=self.get_resource_name(resource_id, resource_type),
+            custom_default_group_created=created_custom_group,
         )
 
         logger.info(

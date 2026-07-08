@@ -17,8 +17,10 @@
 
 """View for internal tenant management."""
 
+import datetime
 import json
 import logging
+import uuid
 from typing import Optional
 
 import requests
@@ -27,7 +29,7 @@ from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import connection, transaction
 from django.db.migrations.recorder import MigrationRecorder
-from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils.html import escape
 from django.views.decorators.http import require_http_methods
@@ -54,13 +56,20 @@ from kessel.inventory.v1beta2 import (
     resource_reference_pb2,
     subject_reference_pb2,
 )
-from kessel.relations.v1beta1 import check_pb2, lookup_pb2, relation_tuples_pb2
-from kessel.relations.v1beta1 import check_pb2_grpc, lookup_pb2_grpc, relation_tuples_pb2_grpc
-from kessel.relations.v1beta1 import common_pb2
+from kessel.relations.v1beta1 import (
+    check_pb2,
+    check_pb2_grpc,
+    common_pb2,
+    lookup_pb2,
+    lookup_pb2_grpc,
+    relation_tuples_pb2,
+    relation_tuples_pb2_grpc,
+)
 from management.cache import JWTCache, TenantCache
 from management.group.relation_api_dual_write_group_handler import RelationApiDualWriteGroupHandler
 from management.inventory_checker.inventory_api_check import (
     BootstrappedTenantInventoryChecker,
+    CrossAccountRequestInventoryChecker,
     GroupPrincipalInventoryChecker,
     RoleRelationInventoryChecker,
     WorkspaceRelationInventoryChecker,
@@ -69,10 +78,8 @@ from management.models import BindingMapping, Group, Permission, Principal, Reso
 from management.principal.proxy import (
     API_TOKEN_HEADER,
     CLIENT_ID_HEADER,
+    PrincipalProxy,
     USER_ENV_HEADER,
-)
-from management.principal.proxy import PrincipalProxy
-from management.principal.proxy import (
     bop_request_status_count,
     bop_request_time_tracking,
 )
@@ -92,10 +99,14 @@ from management.tasks import (
     fix_missing_binding_base_tuples_in_worker,
     migrate_binding_scope_in_worker,
     migrate_data_in_worker,
+    migrate_role_scope_if_changed_in_worker,
     recompute_tenant_role_bindings_in_worker,
+    recover_workspace_events_in_worker,
     remove_deleted_workspace_bindings_in_worker,
     remove_unassigned_system_binding_mappings_in_worker,
     replicate_default_workspaces_in_worker,
+    replicate_updated_workspaces_in_worker,
+    run_kessel_parity_checks_in_worker,
     run_migrations_in_worker,
     run_ocm_performance_in_worker,
     run_seeds_in_worker,
@@ -116,7 +127,8 @@ from rest_framework import status
 
 from api.common.pagination import StandardResultsSetPagination, WSGIRequestResultsSetPagination
 from api.cross_access.model import RequestsRoles
-from api.models import Tenant, User
+from api.cross_access.relation_api_dual_write_cross_access_handler import RelationApiDualWriteCrossAccessHandler
+from api.models import CrossAccountRequest, Tenant, User
 from api.tasks import (
     cross_account_cleanup,
     populate_tenant_account_id_in_worker,
@@ -1982,7 +1994,9 @@ def check_workspace_relation(request, workspace_uuid):
         try:
             if workspace_pairs:
                 workspace_uuid = str(workspace_uuid)
-                workspace_descendants_correct = WorkspaceRelationChecker.check_workspace_descendants(workspace_pairs)
+                workspace_descendants_correct, _ = WorkspaceRelationChecker.check_workspace_descendants(
+                    workspace_pairs
+                )
                 response = {
                     "org_id": workspace.tenant.org_id,
                     "workspace_id": workspace_uuid,
@@ -2084,6 +2098,8 @@ def check_role(request, role_uuid):
                 },
             }
         )
+    except Http404:
+        raise
     except RpcError as e:
         return JsonResponse(
             {"detail": "gRPC error occurred during inventory role relation check", "error": str(e)},
@@ -2092,6 +2108,89 @@ def check_role(request, role_uuid):
     except Exception as e:
         return JsonResponse(
             {"detail": "Unexpected error occurred during inventory role relation check", "error": str(e)}, status=500
+        )
+
+
+def check_cross_account_request(request, request_id):
+    """Check an approved cross account request has correct relations on Inventory API.
+
+    Re-runs the CAR dual writer with an in-memory replicator to determine the expected
+    relation tuples, then verifies each exists in the Inventory API.
+
+    The InMemoryRelationReplicator used here has no external side effects — it writes
+    only to an in-memory tuple store — so the transaction.atomic() + set_rollback(True)
+    block safely prevents any DB mutations without risk of non-transactional side effects.
+    """
+    try:
+        car = get_object_or_404(CrossAccountRequest, request_id=request_id)
+
+        if car.status != CrossAccountRequest.STATUS_APPROVED:
+            return JsonResponse(
+                {"detail": f"Cross account request {request_id} is not approved (status: {car.status})."},
+                status=400,
+            )
+
+        cross_account_roles = car.roles.all()
+        if not cross_account_roles.exists():
+            return JsonResponse(
+                {
+                    "cross_account_request_checks": {
+                        "request_id": str(car.request_id),
+                        "target_org": car.target_org,
+                        "user_id": car.user_id,
+                        "status": car.status,
+                        "roles": [],
+                        "relations_correct": True,
+                    },
+                }
+            )
+
+        tuples = InMemoryTuples()
+
+        with transaction.atomic():
+            handler = RelationApiDualWriteCrossAccessHandler(
+                cross_account_request=car,
+                event_type=ReplicationEventType.APPROVE_CROSS_ACCOUNT_REQUEST,
+                replicator=InMemoryRelationReplicator(tuples),
+            )
+            handler.generate_relations_to_add_roles(cross_account_roles)
+            handler.replicate()
+
+            # Ensure that we don't accidentally update any models.
+            transaction.set_rollback(True)
+
+        car_checker = CrossAccountRequestInventoryChecker()
+        car_correct = car_checker.check_cross_account_request(list(tuples), str(car.request_id))
+
+        return JsonResponse(
+            {
+                "cross_account_request_checks": {
+                    "request_id": str(car.request_id),
+                    "target_org": car.target_org,
+                    "user_id": car.user_id,
+                    "status": car.status,
+                    "roles": [str(r.uuid) for r in cross_account_roles],
+                    "relations_correct": car_correct,
+                },
+            }
+        )
+    except Http404:
+        raise
+    except RpcError as e:
+        return JsonResponse(
+            {
+                "detail": "gRPC error occurred during inventory cross account request check",
+                "error": str(e),
+            },
+            status=400,
+        )
+    except Exception:
+        logger.exception("Unexpected error during inventory cross account request check")
+        return JsonResponse(
+            {
+                "detail": "Unexpected error during inventory cross account request check",
+            },
+            status=500,
         )
 
 
@@ -2109,8 +2208,9 @@ def send_kafka_test_message(request):
         return HttpResponse("Kafka is not enabled", status=400)
 
     try:
-        from core.kafka import RBACProducer
         import uuid
+
+        from core.kafka import RBACProducer
 
         # Create sample test data
         relations_to_add = [
@@ -2601,6 +2701,44 @@ def replicate_default_workspaces(request):
 
 
 @require_http_methods(["POST"])
+def replicate_updated_workspaces(request):
+    """Replicate workspaces updated since the provided time.
+
+    POST /_private/api/utils/replicate_updated_workspaces/?since=<timestamp>&exclude_unchanged_default_workspaces=<bool>
+
+    since must be an ISO 8601 datetime string (e.g. 2026-01-01T18:00:00Z).
+
+    Returns:
+        JSON response indicating the task has been queued
+    """
+    since = request.GET["since"]
+    exclude_unchanged_default_workspaces = (
+        request.GET.get("exclude_unchanged_default_workspaces", "false").lower() == "true"
+    )
+
+    try:
+        datetime.datetime.fromisoformat(since)
+    except ValueError as e:
+        return JsonResponse({"field": "since", "detail": f"invalid datetime: {str(e)}"}, status=400)
+
+    try:
+        replicate_updated_workspaces_in_worker.delay(
+            since=since, exclude_unchanged_default_workspaces=exclude_unchanged_default_workspaces
+        )
+        return JsonResponse(
+            {
+                "message": "Replication enqueued in background worker.",
+                "since": since,
+                "exclude_unchanged_default_workspaces": exclude_unchanged_default_workspaces,
+            },
+            status=202,
+        )
+    except Exception as e:
+        logger.exception("Error replicating updated workspaces", exc_info=True)
+        return JsonResponse({"detail": f"Error replicating updated workspaces: {str(e)}"}, status=500)
+
+
+@require_http_methods(["POST"])
 def recompute_tenant_role_bindings(request, org_id):
     """
     Recompute all role bindings for a tenant.
@@ -2624,3 +2762,208 @@ def recompute_tenant_role_bindings(request, org_id):
             {"detail": f"Error recomputing role bindings for tenant: {str(e)}"},
             status=500,
         )
+
+
+@require_http_methods(["POST"])
+def migrate_role_scope_if_changed(request, role_uuid):
+    """
+    Migrate existing role bindings for a role if its scope has changed.
+
+    POST /_private/api/utils/migrate_role_scope_if_changed/<role_uuid>/
+
+    Returns:
+        JSON response indicating the task has been queued
+    """
+    try:
+        parsed_uuid = uuid.UUID(role_uuid)
+    except ValueError:
+        return JsonResponse({"message": f"invalid UUID: {role_uuid}"}, status=400)
+
+    if not Role.objects.public_tenant_only().filter(uuid=role_uuid, system=True).exists():
+        return JsonResponse({"message": f"role does not exist; UUID: {str(parsed_uuid)}"}, status=404)
+
+    try:
+        migrate_role_scope_if_changed_in_worker.delay(role_uuid=str(parsed_uuid))
+        return JsonResponse({"message": "Job enqueued in background worker."}, status=202)
+    except Exception as e:
+        logger.exception(f"Error migrating scope for role {parsed_uuid}")
+        return JsonResponse(
+            {"detail": f"Error migrating scope for role: {str(e)}"},
+            status=500,
+        )
+
+
+@require_http_methods(["POST"])
+def recover_workspace_events(request: HttpRequest) -> JsonResponse:
+    """Trigger corrective workspace event generation after a DB restore.
+
+    POST /_private/api/disaster_recovery/workspaces/
+
+    Accepts JSON body:
+        {
+            "restore_timestamp": "2026-05-28T10:00:00Z",
+            "buffer_minutes": 5
+        }
+
+    Returns 202 with task_id on success.
+    """
+    if not getattr(settings, "DR_WORKSPACE_RECONCILE_ENABLED", False):
+        return JsonResponse({"detail": "DR recovery is disabled (DR_WORKSPACE_RECONCILE_ENABLED=False)"}, status=403)
+
+    try:
+        body = load_request_body(request)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JsonResponse({"detail": "Invalid JSON body"}, status=400)
+
+    restore_timestamp = body.get("restore_timestamp")
+    if not restore_timestamp:
+        return JsonResponse({"detail": "restore_timestamp is required"}, status=400)
+
+    try:
+        parsed_ts = datetime.datetime.fromisoformat(restore_timestamp)
+    except (ValueError, TypeError):
+        return JsonResponse({"detail": "restore_timestamp must be a valid ISO 8601 datetime"}, status=400)
+
+    if parsed_ts.tzinfo is None:
+        parsed_ts = parsed_ts.replace(tzinfo=datetime.timezone.utc)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if parsed_ts > now:
+        return JsonResponse({"detail": "restore_timestamp must be in the past"}, status=400)
+
+    buffer_minutes = body.get("buffer_minutes", 5)
+    if isinstance(buffer_minutes, bool) or not isinstance(buffer_minutes, int) or buffer_minutes < 0:
+        return JsonResponse({"detail": "buffer_minutes must be a non-negative integer"}, status=400)
+
+    dry_run = body.get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        return JsonResponse({"detail": "dry_run must be a boolean"}, status=400)
+
+    try:
+        task = recover_workspace_events_in_worker.delay(
+            restore_timestamp_iso=restore_timestamp,
+            buffer_minutes=buffer_minutes,
+            dry_run=dry_run,
+        )
+        logger.info(
+            "Workspace DR recovery task enqueued: task_id=%s restore_timestamp=%s buffer_minutes=%d",
+            task.id,
+            restore_timestamp,
+            buffer_minutes,
+        )
+        return JsonResponse(
+            {
+                "task_id": task.id,
+                "status": "enqueued",
+                "restore_timestamp": restore_timestamp,
+                "buffer_minutes": buffer_minutes,
+                "dry_run": dry_run,
+            },
+            status=202,
+        )
+    except Exception:
+        logger.exception("Error enqueuing workspace DR recovery task")
+        return JsonResponse({"detail": "Error enqueuing recovery task"}, status=500)
+
+
+@require_http_methods(["POST"])
+def disaster_recovery_reconcile(request):
+    """Trigger disaster recovery reconciliation for Kessel Relations.
+
+    POST /_private/api/disaster_recovery/reconcile/
+
+    Body: {"restore_timestamp": "2024-01-15T10:30:00Z", "buffer_seconds": 300, "dry_run": false}
+    """
+    if not getattr(settings, "DR_RELATIONS_RECONCILE_ENABLED", False):
+        return JsonResponse({"error": "Disaster recovery reconciliation is not enabled"}, status=403)
+
+    from datetime import datetime
+
+    from management.tasks import run_disaster_recovery_reconcile
+
+    body = load_request_body(request)
+
+    restore_timestamp_str = body.get("restore_timestamp")
+    if not restore_timestamp_str:
+        return JsonResponse({"error": "restore_timestamp is required"}, status=400)
+
+    try:
+        dt = datetime.fromisoformat(restore_timestamp_str.replace("Z", "+00:00"))
+        restore_timestamp_ms = int(dt.timestamp() * 1000)
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "Invalid restore_timestamp format, expected ISO 8601"}, status=400)
+
+    buffer_seconds = body.get("buffer_seconds", 300)
+    if isinstance(buffer_seconds, bool) or not isinstance(buffer_seconds, int) or buffer_seconds < 0:
+        return JsonResponse({"error": "buffer_seconds must be a non-negative integer"}, status=400)
+
+    dry_run = body.get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        return JsonResponse({"error": "dry_run must be a boolean"}, status=400)
+
+    task = run_disaster_recovery_reconcile.delay(
+        restore_timestamp_ms=restore_timestamp_ms,
+        buffer_seconds=buffer_seconds,
+        dry_run=dry_run,
+    )
+
+    return JsonResponse(
+        {
+            "message": "Disaster recovery reconciliation enqueued.",
+            "task_id": str(task.id),
+            "restore_timestamp_ms": restore_timestamp_ms,
+            "buffer_seconds": buffer_seconds,
+            "dry_run": dry_run,
+        },
+        status=202,
+    )
+
+
+def kessel_parity_check(request):
+    """View method for triggering on-demand Kessel-RBAC parity checks.
+
+    POST /_private/api/utils/kessel_parity_check/
+
+    Body: {"org_ids": ["12345", "67890"]}
+
+    Triggers parity checks for the specified org(s) regardless of the
+    PARITY_CHECK_ENABLED setting. The scheduled Celery Beat cron job
+    behavior is unchanged.
+    """
+    if request.method != "POST":
+        return HttpResponse('Invalid method, only "POST" is allowed.', status=405)
+
+    if not request.body:
+        return HttpResponse('Invalid request, must supply "org_ids" in body.', status=400)
+
+    try:
+        body = json.loads(request.body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return HttpResponse("Invalid JSON in request body.", status=400)
+
+    org_ids = body.get("org_ids")
+    if not isinstance(org_ids, list) or len(org_ids) == 0:
+        return HttpResponse(
+            'Invalid request: the "org_ids" array in the body must contain at least one org_id.',
+            status=400,
+        )
+
+    # Validate all entries are non-empty strings
+    for entry in org_ids:
+        if not isinstance(entry, str) or not entry.strip():
+            return HttpResponse(
+                'Invalid request: all entries in "org_ids" must be non-empty strings.',
+                status=400,
+            )
+
+    logger.info("On-demand Kessel parity check requested for org_ids: %s", org_ids)
+    task = run_kessel_parity_checks_in_worker.delay(org_ids=org_ids)
+
+    return JsonResponse(
+        {
+            "message": "Kessel parity check enqueued.",
+            "task_id": str(task.id),
+            "org_ids": org_ids,
+        },
+        status=202,
+    )

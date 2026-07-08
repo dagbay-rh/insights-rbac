@@ -240,7 +240,24 @@ CW_CREATE_LOG_GROUP = ENVIRONMENT.bool("CW_CREATE_LOG_GROUP", default=False)
 LOGGING_FORMATTER = os.getenv("DJANGO_LOG_FORMATTER", "simple")
 DJANGO_LOGGING_LEVEL = os.getenv("DJANGO_LOG_LEVEL", "INFO")
 RBAC_LOGGING_LEVEL = os.getenv("RBAC_LOG_LEVEL", "INFO")
-LOGGING_HANDLERS = os.getenv("DJANGO_LOG_HANDLERS", "console").split(",")
+
+
+def _parse_logging_handlers(raw_value):
+    """Parse comma-separated handler names, strip whitespace, and deduplicate.
+
+    'console' and 'ecs' both write to stderr.  Having both produces duplicate
+    log lines for every event.  When both are specified, keep only 'ecs'
+    (structured JSON for CloudWatch / log aggregation).
+    Use DJANGO_LOG_HANDLERS=console for plain-text development output.
+    """
+    handlers = [h.strip() for h in raw_value.split(",") if h.strip()]
+    if "console" in handlers and "ecs" in handlers:
+        handlers = [h for h in handlers if h != "console"]
+    return handlers
+
+
+LOGGING_HANDLERS = _parse_logging_handlers(os.getenv("DJANGO_LOG_HANDLERS", "console"))
+
 ENV_NAME = os.getenv("ENV_NAME", "stage")
 VERBOSE_FORMATTING = "%(levelname)s %(asctime)s [%(env_name)s] %(module)s %(process)d %(thread)d %(message)s"
 
@@ -413,6 +430,9 @@ else:
     CACHES = {"default": _cache_config}
 
 CELERY_BROKER_URL = ENVIRONMENT.get_value("CELERY_BROKER_URL", default=DEFAULT_REDIS_URL)
+_celery_concurrency = ENVIRONMENT.int("CELERY_WORKER_CONCURRENCY", default=0)
+if _celery_concurrency > 0:
+    CELERY_WORKER_CONCURRENCY = _celery_concurrency
 
 if REDIS_SSL:
     _celery_ssl_conf = {"ssl_cert_reqs": REDIS_SSL_CERT_REQS}
@@ -425,6 +445,7 @@ ROLE_CREATE_ALLOW_LIST = ENVIRONMENT.get_value("ROLE_CREATE_ALLOW_LIST", default
 
 # Dual write migration configuration
 REPLICATION_TO_RELATION_ENABLED = ENVIRONMENT.bool("REPLICATION_TO_RELATION_ENABLED", default=False)
+EPH_ENV = ENVIRONMENT.bool("EPH_ENV", default=False)
 V2_MIGRATION_APP_EXCLUDE_LIST = ENVIRONMENT.get_value("V2_MIGRATION_APP_EXCLUDE_LIST", default="").split(",")
 V2_BOOTSTRAP_TENANT = ENVIRONMENT.bool("V2_BOOTSTRAP_TENANT", default=False)
 
@@ -470,6 +491,7 @@ except ValueError as e:
 
 KAFKA_ENABLED = ENVIRONMENT.get_value("KAFKA_ENABLED", default=False)
 MOCK_KAFKA = ENVIRONMENT.get_value("MOCK_KAFKA", default=False)
+MOCK_REDIS = ENVIRONMENT.get_value("MOCK_REDIS", default=False)
 
 NOTIFICATIONS_ENABLED = ENVIRONMENT.get_value("NOTIFICATIONS_ENABLED", default=False)
 NOTIFICATIONS_RH_ENABLED = ENVIRONMENT.get_value("NOTIFICATIONS_RH_ENABLED", default=False)
@@ -561,6 +583,9 @@ IT_BYPASS_PERMISSIONS_MODIFY_SERVICE_ACCOUNTS = ENVIRONMENT.bool(
 )
 IT_BYPASS_IT_CALLS = ENVIRONMENT.bool("IT_BYPASS_IT_CALLS", default=False)
 IT_BYPASS_TOKEN_VALIDATION = ENVIRONMENT.bool("IT_BYPASS_TOKEN_VALIDATION", default=False)
+IT_BYPASS_SYSTEM_USER_ID = ENVIRONMENT.get_value(
+    "IT_BYPASS_SYSTEM_USER_ID", default="mocked-user-id-because-token-validation-is-disabled"
+)
 IT_SERVICE_BASE_PATH = ENVIRONMENT.get_value("IT_SERVICE_BASE_PATH", default="/auth/realms/redhat-external/apis")
 IT_SERVICE_HOST = ENVIRONMENT.get_value("IT_SERVICE_HOST", default="localhost")
 IT_SERVICE_PORT = ENVIRONMENT.int("IT_SERVICE_PORT", default="443")
@@ -665,6 +690,11 @@ ROOT_SCOPE_PERMISSIONS = ENVIRONMENT.get_value("ROOT_SCOPE_PERMISSIONS", default
 TENANT_SCOPE_PERMISSIONS = ENVIRONMENT.get_value("TENANT_SCOPE_PERMISSIONS", default="")
 DEFAULT_SCOPE_PERMISSIONS = ENVIRONMENT.get_value("DEFAULT_SCOPE_PERMISSIONS", default="")
 
+# Whether to enable automatic scope migration during seeding. (This is intended to allow the migrations to be run
+# manually before enabling the automatic runs, thus preventing the migration running sequentially for all roles on the
+# first seeding run after the feature is added.)
+AUTOMATIC_SCOPE_MIGRATION_ENABLED = ENVIRONMENT.bool("AUTOMATIC_SCOPE_MIGRATION_ENABLED", default=False)
+
 # Parity check settings - background job for comparing RBAC access with Kessel PDP
 PARITY_CHECK_ENABLED = ENVIRONMENT.bool("PARITY_CHECK_ENABLED", default=False)
 PARITY_CHECK_INTERVAL_SECONDS = ENVIRONMENT.int("PARITY_CHECK_INTERVAL_SECONDS", default=300)
@@ -672,6 +702,11 @@ PARITY_CHECK_TENANT_SAMPLE_SIZE = ENVIRONMENT.int("PARITY_CHECK_TENANT_SAMPLE_SI
 PARITY_CHECK_PRINCIPAL_SAMPLE_SIZE = ENVIRONMENT.int("PARITY_CHECK_PRINCIPAL_SAMPLE_SIZE", default=50)
 PARITY_CHECK_ORG_IDS = ENVIRONMENT.str("PARITY_CHECK_ORG_IDS", default="")
 PARITY_CHECK_SCHEDULE = ENVIRONMENT.str("PARITY_CHECK_SCHEDULE", default="0 0 * * *")
+
+# Disaster recovery settings
+DR_RELATIONS_RECONCILE_ENABLED = ENVIRONMENT.bool("DR_RELATIONS_RECONCILE_ENABLED", default=False)
+DR_KAFKA_CONSUMER_GROUP_ID = ENVIRONMENT.get_value("DR_KAFKA_CONSUMER_GROUP_ID", default="rbac-dr-consumer-group")
+DR_MAX_EVENTS_PER_RECONCILE = ENVIRONMENT.int("DR_MAX_EVENTS_PER_RECONCILE", default=10000)
 
 # Org level permissons parent role uuids
 SYSTEM_DEFAULT_ROOT_WORKSPACE_ROLE_UUID = ENVIRONMENT.get_value("SYSTEM_DEFAULT_ROOT_WORKSPACE_ROLE_UUID", default="")
@@ -686,6 +721,7 @@ MCP_TOOL_MAX_WORKERS = ENVIRONMENT.int("MCP_TOOL_MAX_WORKERS", default=10)
 MCP_WRITE_ENABLED = ENVIRONMENT.bool("MCP_WRITE_ENABLED", default=False)
 MCP_WRITE_CONFIRMATION = ENVIRONMENT.bool("MCP_WRITE_CONFIRMATION", default=True)
 MCP_WRITE_CONFIRMATION_TTL = ENVIRONMENT.int("MCP_WRITE_CONFIRMATION_TTL", default=300)
+MCP_PII_REDACTION_ENABLED = ENVIRONMENT.bool("MCP_PII_REDACTION_ENABLED", default=True)
 
 # Manipulation of response to include ungrouped hosts id
 ADD_UNGROUPED_HOSTS_ID = ENVIRONMENT.bool("ADD_UNGROUPED_HOSTS_ID", default=False)
@@ -697,3 +733,8 @@ SYSTEM_USERS = ENVIRONMENT.json("SYSTEM_USERS", default={})
 
 # Principal caching settings
 PRINCIPAL_CACHE_LIFETIME = ENVIRONMENT.int("PRINCIPAL_CACHE_LIFETIME", default=3600)
+
+# Disaster recovery settings
+DR_WORKSPACE_RECONCILE_ENABLED = ENVIRONMENT.bool("DR_WORKSPACE_RECONCILE_ENABLED", default=False)
+DR_WORKSPACE_TOPIC = ENVIRONMENT.str("DR_WORKSPACE_TOPIC", default="outbox.event.workspace")
+DR_KAFKA_CONSUMER_TIMEOUT_MS = ENVIRONMENT.int("DR_KAFKA_CONSUMER_TIMEOUT_MS", default=30000)
