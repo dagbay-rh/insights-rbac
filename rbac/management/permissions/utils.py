@@ -58,8 +58,8 @@ def check_v2_kessel_access(request, relation=KESSEL_READ_RELATION):
     try:
         if not is_v2_write_activated(tenant):
             return False
-    except (TypeError, ValueError):
-        # tenant is not a valid Tenant model instance (e.g. in tests with Mocks)
+    except (TypeError, ValueError) as e:
+        logger.warning("V2 Kessel fallback: is_v2_write_activated check failed: %s: %s", type(e).__name__, e)
         return False
 
     resource_id = tenant.tenant_resource_id()

@@ -107,6 +107,30 @@ class CheckV2KesselAccessTest(TestCase):
         req = self._make_request(tenant=tenant)
         self.assertFalse(check_v2_kessel_access(req))
 
+    @patch("management.permissions.utils.logger")
+    @patch("management.tenant_mapping.v2_activation.is_v2_write_activated", side_effect=TypeError("not a Tenant"))
+    def test_returns_false_and_logs_on_type_error(self, mock_v2, mock_logger):
+        """TypeError from is_v2_write_activated should log warning and return False."""
+        tenant = Mock()
+        req = self._make_request(tenant=tenant)
+        result = check_v2_kessel_access(req)
+        self.assertFalse(result)
+        mock_logger.warning.assert_called_once()
+        warning_msg = mock_logger.warning.call_args[0][0]
+        self.assertIn("is_v2_write_activated check failed", warning_msg)
+
+    @patch("management.permissions.utils.logger")
+    @patch("management.tenant_mapping.v2_activation.is_v2_write_activated", side_effect=ValueError("bad value"))
+    def test_returns_false_and_logs_on_value_error(self, mock_v2, mock_logger):
+        """ValueError from is_v2_write_activated should log warning and return False."""
+        tenant = Mock()
+        req = self._make_request(tenant=tenant)
+        result = check_v2_kessel_access(req)
+        self.assertFalse(result)
+        mock_logger.warning.assert_called_once()
+        warning_msg = mock_logger.warning.call_args[0][0]
+        self.assertIn("is_v2_write_activated check failed", warning_msg)
+
     @patch("management.permissions.workspace_inventory_access.WorkspaceInventoryAccessChecker.check_resource_access")
     @patch("management.principal.proxy.get_kessel_principal_id", return_value="localhost/test-user")
     @patch("management.tenant_mapping.v2_activation.TenantMapping")
