@@ -130,6 +130,22 @@ ENV APP_ROOT=/opt/rbac \
 
 WORKDIR ${APP_ROOT}
 
+# Copy runtime dependencies from build stage
+# bash for entrypoint script
+COPY --from=base /usr/bin/bash /usr/bin/bash
+COPY --from=base /bin/sh /bin/sh
+# psycopg2: libpq and its dependencies
+COPY --from=base /usr/lib64/libpq.so* /usr/lib64/
+COPY --from=base /usr/lib64/libldap*.so* /usr/lib64/
+COPY --from=base /usr/lib64/liblber*.so* /usr/lib64/
+COPY --from=base /usr/lib64/libsasl2.so* /usr/lib64/
+COPY --from=base /usr/lib64/libevent*.so* /usr/lib64/
+# grpc: C++ runtime
+COPY --from=base /usr/lib64/libstdc++.so* /usr/lib64/
+# bash dependencies
+COPY --from=base /usr/lib64/libtinfo.so* /usr/lib64/
+COPY --from=base /usr/lib64/libreadline.so* /usr/lib64/
+
 COPY --from=base /opt/rbac /opt/rbac
 COPY --from=base /licenses /licenses
 
