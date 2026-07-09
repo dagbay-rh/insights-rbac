@@ -337,7 +337,7 @@ objects:
           initialDelaySeconds: ${{CELERY_INITIAL_DELAY_SEC}}
           periodSeconds: ${{CELERY_PERIOD_SEC}}
           successThreshold: 1
-          timeoutSeconds: 10
+          timeoutSeconds: 20
         readinessProbe:
           exec:
             command:
@@ -349,7 +349,7 @@ objects:
           failureThreshold: 3
           periodSeconds: ${{CELERY_PERIOD_SEC}}
           successThreshold: 1
-          timeoutSeconds: 10
+          timeoutSeconds: 20
         resources:
           limits:
             cpu: ${CELERY_SCHEDULER_CPU_LIMIT}
