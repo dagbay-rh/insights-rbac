@@ -1741,6 +1741,9 @@ parameters:
 - description: Kafka consumer group ID for DR reconciliation reader
   name: DR_KAFKA_CONSUMER_GROUP_ID
   value: 'rbac-dr-consumer-group'
+- description: Comma-separated replication event types to skip during DR reconciliation (empty to skip none)
+  name: DR_SKIP_EVENT_TYPES
+  value: 'bootstrap_tenant,bulk_bootstrap_tenant,external_user_update,external_user_disable,bulk_external_user_update'
 - name: EXTERNAL_SYNC_TOPIC
   value: 'platform.rbac.sync'
 - name: EXTERNAL_CHROME_TOPIC
