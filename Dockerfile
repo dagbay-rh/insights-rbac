@@ -126,10 +126,15 @@ ENV APP_ROOT=/opt/rbac \
     VIRTUAL_ENV=/opt/rbac/.venv \
     PATH="/opt/rbac/.venv/bin:$PATH" \
     PROMETHEUS_MULTIPROC_DIR=/tmp \
-    LOG_DIRECTORY=/tmp
+    LOG_DIRECTORY=/tmp \
+    LC_ALL=en_US.UTF-8 \
+    LANG=en_US.UTF-8
 
 WORKDIR ${APP_ROOT}
 
+# Copy locale data to avoid locale warnings that slow startup
+COPY --from=base /usr/lib/locale /usr/lib/locale
+COPY --from=base /usr/share/locale /usr/share/locale
 COPY --from=base /usr/bin/curl /usr/bin/curl
 COPY --from=base /usr/bin/env /usr/bin/env
 COPY --from=base /usr/bin/bash /usr/bin/bash
