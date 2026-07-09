@@ -3800,6 +3800,98 @@ class WorkspaceTestsQuery(WorkspaceViewTests):
         self.assertEqual(payload["meta"]["count"], 2)
         self.assertEqual(len(payload["data"]), 1)
 
+    def test_query_unauthorized_non_admin(self):
+        """Non-admin user without workspace permissions gets 403 on query endpoint."""
+        request_context = self._create_request_context(self.customer_data, self.user_data, is_org_admin=False)
+        headers = request_context["request"].META
+
+        client = APIClient()
+        response = client.post(
+            self._query_url(),
+            data={"ids": [str(self.standard_workspace.id)]},
+            format="json",
+            **headers,
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch("core.kafka.RBACProducer.send_kafka_message")
+    def test_query_authorized_with_read_permission(self, send_kafka_message):
+        """Non-admin user with read permission can query workspaces."""
+        request_context = self._create_request_context(self.customer_data, self.user_data, is_org_admin=False)
+        headers = request_context["request"].META
+
+        self._setup_access_for_principal(self.user_data["username"], "inventory:groups:read")
+
+        client = APIClient()
+        response = client.post(
+            self._query_url(),
+            data={"ids": [str(self.standard_workspace.id)], "type": "all"},
+            format="json",
+            **headers,
+        )
+        payload = response.data
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsInstance(payload.get("data"), list)
+        self.assertGreaterEqual(payload["meta"]["count"], 1)
+
+    @patch("core.kafka.RBACProducer.send_kafka_message")
+    def test_query_uses_read_not_write_permission(self, send_kafka_message):
+        """Query endpoint uses read permission despite being POST.
+
+        A user with only read permission (not write) should be able to query,
+        confirming the endpoint correctly maps POST to 'read' operation.
+        """
+        request_context = self._create_request_context(self.customer_data, self.user_data, is_org_admin=False)
+        headers = request_context["request"].META
+
+        # Only grant read permission, no write
+        self._setup_access_for_principal(self.user_data["username"], "inventory:groups:read")
+
+        client = APIClient()
+        response = client.post(
+            self._query_url(),
+            data={"ids": [str(self.standard_workspace.id)], "type": "all"},
+            format="json",
+            **headers,
+        )
+        # Should succeed with read-only permission
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    @patch("core.kafka.RBACProducer.send_kafka_message")
+    def test_query_scoped_access_filters_results(self, send_kafka_message):
+        """Non-admin user with scoped read permission only sees accessible workspaces."""
+        another_ws = Workspace.objects.create(
+            name="Another Standard Workspace",
+            tenant=self.tenant,
+            type="standard",
+            parent_id=self.default_workspace.id,
+        )
+
+        request_context = self._create_request_context(self.customer_data, self.user_data, is_org_admin=False)
+        headers = request_context["request"].META
+
+        # Grant read access scoped only to standard_workspace
+        self._setup_access_for_principal(
+            self.user_data["username"], "inventory:groups:read", workspace_id=str(self.standard_workspace.id)
+        )
+
+        client = APIClient()
+        response = client.post(
+            self._query_url(),
+            data={"ids": [str(self.standard_workspace.id), str(another_ws.id)], "type": "all"},
+            format="json",
+            **headers,
+        )
+        payload = response.data
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        returned_ids = [ws["id"] for ws in payload.get("data", [])]
+        # User can see the workspace they have access to and its descendants
+        self.assertIn(str(self.standard_workspace.id), returned_ids)
+        # User cannot see the workspace they do NOT have access to
+        self.assertNotIn(str(another_ws.id), returned_ids)
+
 
 @override_settings(ATOMIC_RETRY_DISABLED=True, V2_APIS_ENABLED=True)
 class WorkspaceTestsDetail(WorkspaceViewTests):

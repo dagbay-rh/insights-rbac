@@ -96,9 +96,12 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
                 return WorkspaceWithAncestrySerializer
         return super().get_serializer_class()
 
+    # Actions that use POST but are semantically read-only (no select_for_update needed)
+    READ_ONLY_POST_ACTIONS = frozenset({"query"})
+
     def get_queryset(self):
         """Get queryset override."""
-        if self.request.method not in SAFE_METHODS:
+        if self.request.method not in SAFE_METHODS and self.action not in self.READ_ONLY_POST_ACTIONS:
             return super().get_queryset().select_for_update()
         return super().get_queryset()
 
