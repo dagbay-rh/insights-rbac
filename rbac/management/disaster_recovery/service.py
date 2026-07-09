@@ -4,7 +4,6 @@ import logging
 import time
 
 from django.conf import settings
-
 from management.disaster_recovery.corrective_writer import (
     generate_corrective_actions,
     write_corrective_events,
