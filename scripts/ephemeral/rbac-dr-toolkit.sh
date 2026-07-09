@@ -16,8 +16,8 @@
 #   +  cleanup    — remove all test data and reset state
 #
 # Usage:
-#   ./scripts/ephemeral/rbac-dr-toolkit.sh --rbac-kessel [--step setup|simulate|...|cleanup]
-#   ./scripts/ephemeral/rbac-dr-toolkit.sh --rbac-hbi    [--step setup|simulate|...|cleanup]
+#   DR_STEP=setup ./scripts/ephemeral/rbac-dr-toolkit.sh --rbac-kessel
+#   DR_STEP=setup ./scripts/ephemeral/rbac-dr-toolkit.sh --rbac-hbi
 #
 # Other utility commands:
 #   --workspaces, --replication, --create-workspace, --delete-workspace-db,
@@ -31,7 +31,7 @@ set -euo pipefail
 # ── Environment setup ─────────────────────────────────────────────────────────
 
 EPHEMERAL_NAMESPACE=$(oc project -q 2>/dev/null || true)
-BENTO_BASIC_AUTH_CONSOLE_DOT_USERNAME=jdoe
+BENTO_BASIC_AUTH_CONSOLE_DOT_USERNAME="${BENTO_BASIC_AUTH_CONSOLE_DOT_USERNAME:-jdoe}"
 EPHEMERAL_PASSWORD=$(oc get secret "env-${EPHEMERAL_NAMESPACE:-none}-keycloak" -o json 2>/dev/null \
   | jq -r '.data.defaultPassword // empty' | base64 -d 2>/dev/null || true)
 EPHEMERAL_HOST_NAME=$(oc get frontendenvironment "env-${EPHEMERAL_NAMESPACE:-none}" -o json 2>/dev/null \
@@ -539,7 +539,7 @@ run_seeds() {
 # DR state — shared across phases via a file so each step can be run separately
 # ══════════════════════════════════════════════════════════════════════════════
 
-DR_STATE_FILE="${DR_STATE_FILE:-/tmp/rbac-dr-state.env}"
+DR_STATE_FILE="${DR_STATE_FILE:-${HOME}/.cache/rbac-dr-state.env}"
 
 # Auto-clear stale state when namespace changes (e.g. new bonfire deploy).
 if [[ -f "${DR_STATE_FILE}" ]]; then
@@ -4590,6 +4590,64 @@ dr_hbi_post_check() {
   echo "  ${DR_HBI_WS_SKIP_ID:-?} — SKIPPED (no corrective event needed)"
 }
 
+dr_hbi_cleanup() {
+  # Remove all test data created by DR HBI steps and reset state.
+  # Safe to call at any point — skips missing resources gracefully.
+  dr_state_load
+
+  echo ""
+  echo -e "${BOLD}==================================================================${NC}"
+  echo -e "${BOLD}  CLEANUP: Removing DR HBI test data${NC}"
+  echo -e "${BOLD}==================================================================${NC}"
+  echo ""
+
+  local ws_del_id="${DR_HBI_WS_DEL_ID:-}"
+  local ws_skip_id="${DR_HBI_WS_SKIP_ID:-}"
+  local ws_add_id="${DR_HBI_WS_ADD_ID:-}"
+  local cleaned=0
+
+  # Delete any workspaces that may still exist in the DB (del + skip + add scenarios).
+  local ws_ids_csv
+  ws_ids_csv=$(printf '%s,' "${ws_del_id}" "${ws_skip_id}" "${ws_add_id}" | sed 's/,$//' | tr -s ',')
+  ws_ids_csv="${ws_ids_csv%,}"
+
+  if [[ -n "${ws_del_id}" || -n "${ws_skip_id}" || -n "${ws_add_id}" ]]; then
+    _db_creds 2>/dev/null || {
+      warn "Could not get DB credentials — skipping DB cleanup."
+      echo ""
+      echo "  State file still contains references. Clear manually:"
+      echo "    rm -f ${DR_STATE_FILE}"
+      return 0
+    }
+
+    for ws_id in "${ws_del_id}" "${ws_skip_id}" "${ws_add_id}"; do
+      [[ -z "${ws_id}" ]] && continue
+      local result
+      result=$(PGPASSWORD="${_db_password}" oc exec "${_db_pod}" -- \
+        psql -U "${_db_user}" -d "${_db_name}" -t -A \
+        -c "DELETE FROM management_workspace WHERE id='${ws_id}' RETURNING id;" 2>/dev/null | tr -d '\r')
+      if [[ -n "${result}" ]]; then
+        good "Deleted workspace ${ws_id}"
+        cleaned=$((cleaned + 1))
+      else
+        echo -e "  ${DIM}[----]${NC} ${ws_id} (not found, already removed)"
+      fi
+    done
+  else
+    echo -e "  ${DIM}No workspace IDs in state — nothing to clean from DB.${NC}"
+  fi
+
+  # Clear state file.
+  if [[ -f "${DR_STATE_FILE}" ]]; then
+    rm -f "${DR_STATE_FILE}"
+    good "State file removed: ${DR_STATE_FILE}"
+  fi
+
+  echo ""
+  echo -e "  Cleaned ${GREEN}${cleaned}${NC} workspace(s) from DB. State reset."
+  echo "  Ready for a fresh run."
+}
+
 dr_hbi() {
   local step="${DR_STEP:-all}"
   echo "=== RBAC <-> HBI DR [disaster_recovery/workspaces/] step=${step} ==="
@@ -4612,6 +4670,7 @@ dr_hbi() {
     fix)        dr_hbi_fix ;;
     manual-fix) dr_hbi_manual_fix ;;
     post-check) dr_hbi_post_check ;;
+    cleanup)    dr_hbi_cleanup ;;
     state)      dr_state_show ;;
     all)
       dr_hbi_setup
@@ -4645,7 +4704,7 @@ dr_hbi() {
       echo -e "${BOLD}${GREEN}  RBAC <-> HBI DR: ALL STEPS COMPLETED SUCCESSFULLY${NC}"
       echo -e "${BOLD}${GREEN}==================================================================${NC}"
       echo ""
-      echo "  Steps executed: setup → simulate → fix"
+      echo "  Steps executed: setup → simulate → fix → cleanup"
       echo "  Scenarios tested:"
       echo "    1. Corrective DELETE — create event + NOT in DB → DELETE written"
       echo "    2. Corrective CREATE — delete event + in DB    → CREATE written"
@@ -4660,11 +4719,14 @@ dr_hbi() {
         echo "  Mode: --minimal-data (1 resource per scenario)"
       fi
       echo ""
+      dr_hbi_cleanup
+
+      echo ""
       echo "  To verify results manually:"
       echo "    DR_STEP=post-check $0 --rbac-hbi"
       echo ""
       ;;
-    *) err "Unknown step: ${step}. Valid: setup|simulate|pre-check|dry-run|fix|manual-fix|post-check|state|all"; return 1 ;;
+    *) err "Unknown step: ${step}. Valid: setup|simulate|pre-check|dry-run|fix|manual-fix|post-check|cleanup|state|all"; return 1 ;;
   esac
 }
 

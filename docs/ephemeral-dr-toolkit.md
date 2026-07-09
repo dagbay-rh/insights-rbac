@@ -121,8 +121,8 @@ Both `--rbac-kessel` and `--rbac-hbi` test three scenarios that correspond to th
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DR_STEP` | `all` | Phase to run: `setup\|simulate\|pre-check\|dry-run\|fix\|manual-fix\|post-check\|state\|all` |
-| `DR_STATE_FILE` | `/tmp/rbac-dr-state.env` | State file path (stores IDs, timestamps between phases) |
+| `DR_STEP` | `all` | Phase to run: `setup\|simulate\|pre-check\|dry-run\|fix\|manual-fix\|post-check\|cleanup\|state\|all` |
+| `DR_STATE_FILE` | `~/.cache/rbac-dr-state.env` | State file path (stores IDs, timestamps between phases) |
 | `DR_KESSEL_ORG_ID` | auto-resolved | Org ID for Kessel scenario |
 | `DR_HBI_ORG_ID` | auto-resolved | Org ID for HBI scenario |
 | `DR_BUFFER_SECONDS` | `300` | Kessel reconcile window (seconds) |
@@ -198,7 +198,7 @@ jq 'select(.level == "ERROR")' worker.jsonl
 
 ## State File
 
-The toolkit persists state between phases in `/tmp/rbac-dr-state.env` (plain key=value format). This allows running phases independently:
+The toolkit persists state between phases in `~/.cache/rbac-dr-state.env` (plain key=value format). This allows running phases independently:
 
 ```bash
 # Run setup, then come back later for simulate
