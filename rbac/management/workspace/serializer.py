@@ -119,6 +119,90 @@ class WorkspaceListInputSerializer(serializers.Serializer):
         return data
 
 
+class WorkspaceQueryInputSerializer(serializers.Serializer):
+    """Input serializer for workspace query via POST body.
+
+    POST /v2/workspaces/query/
+
+    Allows filtering by a list of workspace IDs in the request body,
+    avoiding URL length limits when querying many workspaces at once.
+    """
+
+    ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        required=True,
+        allow_empty=False,
+        max_length=3000,
+        help_text="List of workspace UUIDs to filter by.",
+    )
+    type = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Filter by workspace type",
+    )
+    name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text=(
+            "Filter by workspace name. Case-insensitive substring match by default;"
+            " use * for glob patterns (e.g. foo*)."
+        ),
+    )
+    parent_id = serializers.UUIDField(required=False, help_text="Filter by parent workspace ID")
+    with_ancestry = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text="Include ancestor and fallback workspaces (root, default, ungrouped) in the response.",
+    )
+
+    def to_internal_value(self, data):
+        """Reject NUL bytes in string fields."""
+        for key, value in data.items():
+            if isinstance(value, str) and "\x00" in value:
+                raise serializers.ValidationError({key: f"The '{key}' field contains invalid characters."})
+        return super().to_internal_value(data)
+
+    def validate_ids(self, value: list) -> list[str]:
+        """Convert UUIDs to lowercase strings and deduplicate."""
+        return list(dict.fromkeys(str(uid).lower() for uid in value))
+
+    def validate_type(self, value: str | None) -> list[str] | None:
+        """Normalize empty to None, split comma-separated values, validate against allowed types."""
+        if not value or not value.strip():
+            return None
+        fields = [v.strip().lower() for v in value.split(",") if v.strip()]
+        if not fields:
+            return None
+        for val in fields:
+            if val not in _VALID_TYPES:
+                raise serializers.ValidationError(
+                    f"type query parameter value '{val}' is invalid. "
+                    f"Allowed values are {[str(v) for v in _VALID_TYPES]}."
+                )
+        if _ALL_TYPE in fields:
+            return None
+        return fields
+
+    def validate_name(self, value: str | None) -> str | None:
+        """Return None for empty values, strip surrounding whitespace."""
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        return cleaned
+
+    def validate_parent_id(self, value) -> str | None:
+        """Convert UUID to string."""
+        return str(value) if value else None
+
+    def validate(self, data):
+        """Cross-field validation: ids without explicit type defaults to standard."""
+        if data.get("ids") is not None and "type" not in self.initial_data:
+            data["type"] = [Workspace.Types.STANDARD]
+        return data
+
+
 class WorkspaceSerializer(serializers.ModelSerializer):
     """Serializer for the Workspace model."""
 

@@ -40,7 +40,12 @@ from rest_framework.response import Response
 
 from api.common.pagination import V2ResultsSetPagination
 from .model import Workspace
-from .serializer import WorkspaceListInputSerializer, WorkspaceSerializer, WorkspaceWithAncestrySerializer
+from .serializer import (
+    WorkspaceListInputSerializer,
+    WorkspaceQueryInputSerializer,
+    WorkspaceSerializer,
+    WorkspaceWithAncestrySerializer,
+)
 from ..utils import flatten_validation_error, validate_uuid
 
 INCLUDE_ANCESTRY_KEY = "include_ancestry"
@@ -196,6 +201,32 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
 
         # Bridge query param to access layer; read by WorkspaceAccessFilterBackend and
         # passed explicitly to is_user_allowed_v2(with_ancestry=...).
+        request.with_ancestry = validated_params.get("with_ancestry", False)
+
+        queryset = self.filter_queryset(self.get_queryset())
+        queryset = self._service.list(queryset, validated_params)
+
+        page = self.paginate_queryset(queryset)
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
+
+    @action(detail=False, methods=["post"], url_path="query")
+    def query(self, request, *args, **kwargs):
+        """Query workspaces by a list of IDs via POST body.
+
+        POST /v2/workspaces/query/
+
+        Accepts a JSON body with a list of workspace IDs, avoiding URL length limits
+        when querying many workspaces at once. Returns the same paginated response
+        as GET /v2/workspaces/?ids=...
+
+        Pagination query parameters (limit, offset, order_by) are still read from
+        the URL query string, consistent with DRF conventions.
+        """
+        input_serializer = WorkspaceQueryInputSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        validated_params = input_serializer.validated_data
+
         request.with_ancestry = validated_params.get("with_ancestry", False)
 
         queryset = self.filter_queryset(self.get_queryset())
