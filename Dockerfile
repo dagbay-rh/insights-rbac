@@ -131,6 +131,7 @@ ENV APP_ROOT=/opt/rbac \
 WORKDIR ${APP_ROOT}
 
 COPY --from=base /usr/bin/curl /usr/bin/curl
+COPY --from=base /usr/bin/env /usr/bin/env
 COPY --from=base /usr/bin/bash /usr/bin/bash
 COPY --from=base /bin/sh /bin/sh
 COPY --from=base /usr/lib64/ /usr/lib64/
