@@ -550,6 +550,10 @@ namespace Workspaces {
         @doc("Sort by specified field(s), prefix with '-' for descending order. Allowed fields: name, created, modified, type.")
         @example("-created")
         @query order_by?: string = "name";
+
+        @doc("When true, list responses include ancestor workspaces for tree navigation and fallback workspaces (root, default, ungrouped) when the user has no explicit access. When false (default), only workspaces with explicit Inventory permission are returned.")
+        @example(false)
+        @query with_ancestry?: boolean = false;
     ): WorkspaceListResponse | Problems.CommonProblems;
 
     @doc("Create workspace in tenant")
@@ -1576,4 +1580,117 @@ namespace Roles {
     @post op batchDelete(
         @body body: BatchDeleteRolesRequest
     ): BatchDeleteRolesResponse | Problems.CommonProblems | Problems.Problem404;
+}
+
+@doc("Principal type")
+enum PrincipalType {
+    user,
+    @doc("Service account principal")
+    `service-account`,
+}
+
+@example(#{
+    uuid: "550e8400-e29b-41d4-a716-446655440002",
+    username: "jdoe",
+    type: PrincipalType.user,
+    user_id: "12345",
+    service_account_id: null
+})
+model Principal {
+    @doc("UUID that uniquely identifies the principal")
+    uuid: UUID;
+    @doc("Username of the principal")
+    username: string;
+    @doc("Type of the principal: user or service-account")
+    type: PrincipalType;
+    @doc("External user ID. Null for service accounts.")
+    user_id: string | null;
+    @doc("Service account client ID. Null for users.")
+    service_account_id: string | null;
+}
+
+model PrincipalListResponse {
+    @statusCode _: 200;
+    meta: OffsetPaginationMeta;
+    links: OffsetPaginationLinks;
+    data: Principal[];
+}
+
+@route("/principals/")
+@tag("Principals")
+@doc("Operations about principals")
+namespace Principals {
+
+    @doc("List the principals for a tenant")
+    @summary("List the principals for a tenant")
+    @opExample(#{
+        parameters: #{
+            limit: 10
+        },
+        returnType: #{
+            _: 200,
+            meta: #{
+                count: 2,
+                limit: 10,
+                offset: 0
+            },
+            links: #{
+                first: "/api/rbac/v2/principals/?limit=10&offset=0",
+                next: null,
+                previous: null,
+                last: "/api/rbac/v2/principals/?limit=10&offset=0"
+            },
+            data: #[
+                #{
+                    uuid: "550e8400-e29b-41d4-a716-446655440002",
+                    username: "jdoe",
+                    type: PrincipalType.user,
+                    user_id: "12345",
+                    service_account_id: null
+                },
+                #{
+                    uuid: "660e8400-e29b-41d4-a716-446655440003",
+                    username: "service-account-abc123",
+                    type: PrincipalType.`service-account`,
+                    user_id: null,
+                    service_account_id: "abc123"
+                }
+            ]
+        }
+    })
+    @get op list(
+        @query limit?: Limit = DefaultLimit;
+
+        @query offset?: Offset = DefaultOffset;
+
+        @doc("Filter by username. Case-insensitive substring match by default; use * for glob patterns (e.g. jd*).")
+        @query username?: string;
+
+        @doc("Filter by principal type: user or service-account.")
+        @query type?: PrincipalType;
+
+        @doc("Sort by specified field, prefix with '-' for descending order. Allowed fields: username.")
+        @query order_by?: OrderBy;
+    ): PrincipalListResponse | Problems.CommonProblems;
+
+
+    @route("{uuid}/")
+    @doc("Retrieve a single principal by UUID")
+    @summary("Retrieve a single principal by UUID")
+    @opExample(#{
+        parameters: #{
+            uuid: "550e8400-e29b-41d4-a716-446655440002"
+        },
+        returnType: #{
+            _: 200,
+            uuid: "550e8400-e29b-41d4-a716-446655440002",
+            username: "jdoe",
+            type: PrincipalType.user,
+            user_id: "12345",
+            service_account_id: null
+        }
+    })
+    @get op read(
+        @path uuid: UUID;
+    ): ItemResponse<Principal, 200> | Problems.CommonProblems | Problems.Problem404;
 }
