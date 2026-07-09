@@ -123,13 +123,21 @@ FROM registry.access.redhat.com/hi/core-runtime:2.42-openssl-fips
 
 ENV APP_ROOT=/opt/rbac \
     APP_HOME=/opt/rbac/rbac \
+    APP_CONFIG=/opt/rbac/rbac/gunicorn.py \
+    APP_MODULE=rbac.wsgi \
+    APP_NAMESPACE=rbac \
     VIRTUAL_ENV=/opt/rbac/.venv \
     PATH="/opt/rbac/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=UTF-8 \
+    LC_ALL=C.UTF-8 \
+    LANG=C.UTF-8 \
     PROMETHEUS_MULTIPROC_DIR=/tmp \
     LOG_DIRECTORY=/tmp
 
 WORKDIR ${APP_ROOT}
 
+# Python binaries (not included in core-runtime)
 COPY --from=base /usr/bin/python3 /usr/bin/python3.12 /usr/bin/
 COPY --from=base /usr/lib64/ /usr/lib64/
 COPY --from=base /opt/rbac /opt/rbac
