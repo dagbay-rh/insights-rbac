@@ -731,6 +731,83 @@ namespace Workspaces {
     ): MoveWorkspaceResponse
       | Problems.CommonProblems
       | Problems.Problem404;
+
+    @example(#{
+        ids: #[
+            "e4277742-b91c-43f1-a185-b827e8574345",
+            "c1f729e2-3e2b-4f9e-b247-a4b568393e11"
+        ]
+    })
+    model WorkspaceQueryRequest {
+        @doc("List of workspace UUIDs to filter by.")
+        @minItems(1)
+        @maxItems(3000)
+        ids: UUID[];
+
+        @doc("Filter by workspace type. Supports comma-separated values (e.g. standard,ungrouped-hosts). Defaults to standard when ids are provided without explicit type.")
+        type?: string;
+
+        @doc("Filter by workspace name. Case-insensitive substring match by default; use * for glob patterns.")
+        name?: string;
+
+        @doc("Filter by parent workspace UUID.")
+        parent_id?: UUID;
+
+        @doc("Include ancestor and fallback workspaces in the response.")
+        with_ancestry?: boolean = false;
+    }
+
+    @doc("Query workspaces by a list of IDs")
+    @summary("Query workspaces by a list of IDs")
+    @route("query/")
+    @opExample(#{
+        parameters: #{
+            limit: 10,
+            offset: 0,
+            body: #{
+                ids: #[
+                    "e4277742-b91c-43f1-a185-b827e8574345",
+                    "c1f729e2-3e2b-4f9e-b247-a4b568393e11"
+                ],
+                type: "standard"
+            }
+        },
+        returnType: #{
+            meta: #{
+                count: 2,
+                limit: 10,
+                offset: 0
+            },
+            links: #{
+                first: "/api/rbac/v2/workspaces/query/?limit=10&offset=0",
+                next: null,
+                previous: null,
+                last: "/api/rbac/v2/workspaces/query/?limit=10&offset=0"
+            },
+            data: #[
+                #{
+                    id: "e4277742-b91c-43f1-a185-b827e8574345",
+                    parent_id: "c1f729e2-3e2b-4f9e-b247-a4b568393e11",
+                    type: WorkspaceTypes.standard,
+                    name: "My first workspace",
+                    description: "This is a basic workspace.",
+                    created: offsetDateTime.fromISO("2024-05-06T12:20-12-0700"),
+                    modified: offsetDateTime.fromISO("2024-05-06T12:20-12-0700")
+                }
+            ]
+        }
+    })
+    @post op query(
+        @query limit?: Limit = DefaultLimit;
+
+        @doc("Offset for offset-based pagination.")
+        @query offset?: Offset = DefaultOffset;
+
+        @doc("Sort by specified field(s), prefix with '-' for descending order. Allowed fields: name, created, modified, type.")
+        @query order_by?: string = "name";
+
+        @body body: WorkspaceQueryRequest;
+    ): WorkspaceListResponse | Problems.CommonProblems;
 }
 
 @route("/role-bindings/")
