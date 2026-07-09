@@ -16,11 +16,13 @@
 #
 """Test the MCP views via _private/_a2s/ path."""
 
+import concurrent.futures
 import inspect
 import json
+import threading
 import time
 from importlib import reload
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.test import override_settings
 from django.urls import clear_url_caches, reverse
@@ -29,11 +31,21 @@ from management.mcp_views import (
     ApiVersion,
     ToolConfig,
     ToolTimeoutError,
+    _MAX_PERMISSIONS_PER_ROLE,
     _TOOL_CONFIG,
     _check_kessel_access,
     _check_v1_access,
     _execute_with_timeout,
     _permission_matches,
+    _sanitize_validation_error,
+    _shutdown_in_progress,
+    _validate_permission_format,
+    _validate_tool_arguments,
+    _validate_uuid_field,
+    _validate_uuid_list,
+    _validate_v2_permission,
+    _validate_write_payload,
+    mcp_shutdown,
 )
 from management.models import Access, AuditLog, Group, Permission, Policy, Principal, Role
 from management.workspace.model import Workspace
@@ -384,7 +396,8 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(tool_output["meta"]["count"], 1)
         self.assertIn("links", tool_output)
         self.assertEqual(len(tool_output["data"]), 1)
-        self.assertEqual(tool_output["data"][0]["username"], "test_user")
+        self.assertNotIn("email", tool_output["data"][0])
+        self.assertNotIn("last_name", tool_output["data"][0])
 
         self.assertEqual(len(result["content"]), 2)
         self.assertIn("IMPORTANT", result["content"][1]["text"])
@@ -414,7 +427,7 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         result = data["result"]
         self.assertFalse(result["isError"])
         tool_output = json.loads(result["content"][0]["text"])
-        self.assertEqual(tool_output["data"][0]["username"], "plain_user")
+        self.assertIn("username", tool_output["data"][0])
 
     @patch(
         "management.principal.proxy.PrincipalProxy.request_principals",
@@ -510,7 +523,8 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         tool_output = self._get_tool_output(response)
         self.assertEqual(tool_output["meta"]["count"], 1)
         self.assertEqual(len(tool_output["data"]), 1)
-        self.assertEqual(tool_output["data"][0]["username"], "rbac_user")
+        self.assertNotIn("email", tool_output["data"][0])
+        self.assertNotIn("last_name", tool_output["data"][0])
 
     @patch(
         "management.principal.proxy.PrincipalProxy.request_principals",
@@ -532,9 +546,9 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         tool_output = self._get_tool_output(response)
         self.assertEqual(tool_output["meta"]["count"], 2)
         self.assertEqual(len(tool_output["data"]), 2)
-        usernames = [u["username"] for u in tool_output["data"]]
-        self.assertIn("jsmith", usernames)
-        self.assertIn("asmith", usernames)
+        for user in tool_output["data"]:
+            self.assertNotIn("email", user)
+            self.assertNotIn("last_name", user)
 
     @patch(
         "management.principal.proxy.PrincipalProxy.request_principals",
@@ -555,7 +569,8 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         tool_output = self._get_tool_output(response)
         self.assertEqual(tool_output["meta"]["count"], 1)
         self.assertEqual(len(tool_output["data"]), 1)
-        self.assertEqual(tool_output["data"][0]["username"], "jsmith")
+        self.assertNotIn("email", tool_output["data"][0])
+        self.assertNotIn("last_name", tool_output["data"][0])
 
     @patch(
         "management.principal.proxy.PrincipalProxy.request_principals",
@@ -596,10 +611,8 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(tool_output["meta"]["count"], 2)
         self.assertEqual(len(tool_output["data"]), 2)
         for user in tool_output["data"]:
-            self.assertEqual(list(user.keys()), ["username"])
-        usernames = [u["username"] for u in tool_output["data"]]
-        self.assertIn("jsmith", usernames)
-        self.assertIn("asmith", usernames)
+            self.assertIn("username", user)
+            self.assertNotIn("email", user)
 
     @patch(
         "management.principal.proxy.PrincipalProxy.request_principals",
@@ -688,6 +701,26 @@ class MCPViewTests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         tool_output = self._get_tool_output(response)
         self.assertNotIn("hint", tool_output)
+
+    @override_settings(MCP_PII_REDACTION_ENABLED=False)
+    @patch(
+        "management.principal.proxy.PrincipalProxy.request_principals",
+        return_value={
+            "status_code": 200,
+            "data": [
+                {"username": "test_user", "email": "test@example.com", "first_name": "Test", "last_name": "User"}
+            ],
+            "userCount": 1,
+        },
+    )
+    def test_list_principals_pii_visible_when_redaction_disabled(self, mock_request):
+        """Positive: PII fields are returned when PII redaction is disabled via env var."""
+        response = self._call_tool("list_principals", {"limit": 10})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["data"][0]["username"], "test_user")
+        self.assertEqual(tool_output["data"][0]["email"], "test@example.com")
 
     def test_tools_call_unknown_tool_returns_error(self):
         """Negative: Calling an unknown tool returns error."""
@@ -2960,8 +2993,9 @@ class MCPGetUserStateTests(MCPToolTestMixin, IdentityRequest):
         self.assertFalse(data["result"]["isError"])
         tool_output = self._get_tool_output(response)
 
-        # Verify basic structure
-        self.assertEqual(tool_output["username"], self.test_username)
+        # Verify basic structure — PII redacted, uuid present
+        self.assertNotIn("username", tool_output)
+        self.assertEqual(tool_output["uuid"], str(self.principal.uuid))
         self.assertEqual(tool_output["org_version"], "v1")
         self.assertIn("groups", tool_output)
         self.assertIn("access", tool_output)
@@ -3047,7 +3081,8 @@ class MCPGetUserStateTests(MCPToolTestMixin, IdentityRequest):
         tool_output = self._get_tool_output(response)
 
         self.assertNotIn("error", tool_output)
-        self.assertEqual(tool_output["username"], self.test_username)
+        self.assertNotIn("username", tool_output)
+        self.assertEqual(tool_output["uuid"], str(self.principal.uuid))
         self.assertIn("groups", tool_output)
 
     @patch("management.mcp_views._list_principals_by_name")
@@ -3147,6 +3182,132 @@ class MCPGetUserStateTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("check_specific_permission", tool_output["hints"])
         self.assertIn("view_audit_details", tool_output["hints"])
         self.assertIn("trace_role_permissions", tool_output["hints"])
+
+    @override_settings(MCP_PII_REDACTION_ENABLED=False)
+    def test_get_user_state_pii_visible_when_redaction_disabled(self):
+        """Positive: get_user_state returns username instead of uuid when redaction is disabled via env var."""
+        response = self._call_tool("get_user_state", {"username": self.test_username})
+
+        tool_output = self._get_tool_output(response)
+        self.assertIn("username", tool_output)
+        self.assertEqual(tool_output["username"], self.test_username)
+        self.assertNotIn("uuid", tool_output)
+
+    def test_get_user_state_description_contains_offboarding_keywords(self):
+        """Positive: get_user_state tool description contains offboarding trigger keywords."""
+        body = {"jsonrpc": "2.0", "method": "tools/list", "id": 2, "params": {}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+        tools = response.json()["result"]["tools"]
+        tool = next(t for t in tools if t["name"] == "get_user_state")
+        description = tool["description"]
+
+        self.assertIn("offboard", description)
+        self.assertIn("contractor", description.lower())
+        self.assertIn("compliance report", description)
+        self.assertIn("AFTER ANALYSIS", description)
+
+
+class MCPLookupPersonTests(MCPToolTestMixin, IdentityRequest):
+    """Tests for the lookup_person MCP tool (forwarding alias for get_user_state)."""
+
+    def setUp(self):
+        """Set up lookup_person tests."""
+        super().setUp()
+        self.url = "/_private/_a2s/mcp/"
+        self.client = APIClient()
+        self.test_username = self.user_data["username"]
+        self.principal = Principal.objects.create(username=self.test_username, tenant=self.tenant)
+
+        self.group = Group.objects.create(
+            name="Contractor Team", description="External contractors", tenant=self.tenant
+        )
+        self.group.principals.add(self.principal)
+
+        self.role = Role.objects.create(name="Viewer", display_name="Viewer", tenant=self.tenant)
+        self.permission = Permission.objects.create(
+            application="inventory",
+            resource_type="hosts",
+            verb="read",
+            permission="inventory:hosts:read",
+            tenant=self.tenant,
+        )
+        self.access = Access.objects.create(permission=self.permission, role=self.role, tenant=self.tenant)
+
+        self.policy = Policy.objects.create(name="contractor_policy", group=self.group, tenant=self.tenant)
+        self.policy.roles.add(self.role)
+
+    def tearDown(self):
+        """Tear down lookup_person tests."""
+        Policy.objects.all().delete()
+        Access.objects.all().delete()
+        Role.objects.all().delete()
+        Permission.objects.all().delete()
+        Group.objects.all().delete()
+        Principal.objects.all().delete()
+        super().tearDown()
+
+    def test_lookup_person_registered_in_tools_list(self):
+        """Positive: lookup_person appears in the MCP tools/list response."""
+        tool_names = self._get_tool_names()
+        self.assertIn("lookup_person", tool_names)
+
+    def test_lookup_person_description_contains_contractor_keywords(self):
+        """Positive: lookup_person description contains contractor/offboarding keywords."""
+        body = {"jsonrpc": "2.0", "method": "tools/list", "id": 2, "params": {}}
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+        tools = response.json()["result"]["tools"]
+        tool = next(t for t in tools if t["name"] == "lookup_person")
+        description = tool["description"]
+
+        self.assertIn("contractor", description)
+        self.assertIn("vendor", description)
+        self.assertIn("consultant", description)
+        self.assertIn("offboarding", description)
+
+    def test_lookup_person_returns_same_data_as_get_user_state(self):
+        """Positive: lookup_person returns identical output to get_user_state."""
+        response_person = self._call_tool("lookup_person", {"username": self.test_username})
+        response_state = self._call_tool("get_user_state", {"username": self.test_username})
+
+        output_person = self._get_tool_output(response_person)
+        output_state = self._get_tool_output(response_state)
+
+        self.assertEqual(output_person["uuid"], output_state["uuid"])
+        self.assertEqual(output_person["org_version"], output_state["org_version"])
+        self.assertEqual(output_person["summary"]["group_count"], output_state["summary"]["group_count"])
+        self.assertEqual(output_person["summary"]["permission_count"], output_state["summary"]["permission_count"])
+
+    def test_lookup_person_success(self):
+        """Positive: lookup_person returns comprehensive user state."""
+        response = self._call_tool("lookup_person", {"username": self.test_username})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        tool_output = self._get_tool_output(response)
+
+        self.assertEqual(tool_output["uuid"], str(self.principal.uuid))
+        self.assertIn("groups", tool_output)
+        self.assertIn("access", tool_output)
+        self.assertIn("summary", tool_output)
+
+        self.assertEqual(tool_output["summary"]["group_count"], 1)
+        self.assertEqual(tool_output["groups"][0]["name"], "Contractor Team")
+
+    def test_lookup_person_user_not_found(self):
+        """Negative: lookup_person returns error for non-existent user."""
+        response = self._call_tool("lookup_person", {"username": "nonexistent_contractor"})
+
+        tool_output = self._get_tool_output(response)
+        self.assertIn("error", tool_output)
+        self.assertIn("not found", tool_output["error"])
+
+    def test_lookup_person_without_auth_returns_error(self):
+        """Permission: lookup_person without auth returns auth error."""
+        response = self._call_tool("lookup_person", {"username": self.test_username}, use_auth=False)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.json()
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32000)
 
 
 @override_settings(BYPASS_BOP_VERIFICATION=True, V2_APIS_ENABLED=True)
@@ -3549,6 +3710,7 @@ class MCPInvestigateTamAccessTests(MCPToolTestMixin, IdentityRequest):
         tool_output = self._get_tool_output(response)
         self.assertEqual(len(tool_output["requests"]), 0)
         self.assertIn("filtered_count", tool_output["analysis"])
+        self.assertIn("lifecycle", tool_output["analysis"])
 
     @patch("management.principal.proxy.PrincipalProxy.request_filtered_principals")
     def test_investigate_tam_access_required_permission_found(self, mock_proxy):
@@ -3588,7 +3750,7 @@ class MCPInvestigateTamAccessTests(MCPToolTestMixin, IdentityRequest):
         )
 
     def test_investigate_tam_access_no_requests(self):
-        """Negative: investigate_tam_access returns empty when no requests exist."""
+        """Negative: investigate_tam_access returns enriched response when no requests exist."""
         # Delete the test cross-account request
         self.car.delete()
 
@@ -3598,6 +3760,23 @@ class MCPInvestigateTamAccessTests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(len(tool_output["requests"]), 0)
         self.assertIn("message", tool_output["analysis"])
         self.assertIn("hint", tool_output["analysis"])
+        self.assertIn("other_statuses", tool_output["analysis"])
+        self.assertIn("pending", tool_output["analysis"]["other_statuses"])
+        self.assertIn("expired", tool_output["analysis"]["other_statuses"])
+        self.assertIn("lifecycle", tool_output["analysis"])
+        self.assertIn("create", tool_output["analysis"]["lifecycle"])
+
+    def test_investigate_tam_access_no_requests_with_pending(self):
+        """Positive: investigate_tam_access shows pending count when no approved requests exist."""
+        self.car.status = "pending"
+        self.car.save()
+
+        response = self._call_tool("investigate_tam_access")
+
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(len(tool_output["requests"]), 0)
+        self.assertEqual(tool_output["analysis"]["other_statuses"]["pending"], 1)
+        self.assertIn("pending", tool_output["analysis"]["hint"])
 
     @patch("management.principal.proxy.PrincipalProxy.request_filtered_principals")
     def test_investigate_tam_access_shows_days_remaining(self, mock_proxy):
@@ -3747,9 +3926,10 @@ class AuditRedhatAccessTests(MCPToolTestMixin, IdentityRequest):
         tool_output = self._get_tool_output(response)
         self.assertEqual(len(tool_output["active_access"]), 2)
 
-        # Check first user
-        user1 = next(u for u in tool_output["active_access"] if "User1" in u["user_info"]["name"])
-        self.assertEqual(user1["user_info"]["email"], "user1@example.com")
+        # PII is redacted — user_info contains only user_id
+        user1 = next(u for u in tool_output["active_access"] if u["user_info"]["user_id"] == "10001")
+        self.assertNotIn("name", user1["user_info"])
+        self.assertNotIn("email", user1["user_info"])
         self.assertIn("Test role 1", [r["name"] for r in user1["roles"]])
 
     @patch("management.principal.proxy.PrincipalProxy.request_filtered_principals")
@@ -3845,7 +4025,7 @@ class AuditRedhatAccessTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("other-app", tool_output["summary"]["permissions_by_application"])
 
     def test_audit_redhat_access_no_requests(self):
-        """Negative: audit_redhat_access returns empty when no requests exist."""
+        """Negative: audit_redhat_access returns enriched response when no requests exist."""
         CrossAccountRequest.objects.all().delete()
 
         response = self._call_tool("audit_redhat_access")
@@ -3853,7 +4033,26 @@ class AuditRedhatAccessTests(MCPToolTestMixin, IdentityRequest):
         tool_output = self._get_tool_output(response)
         self.assertEqual(len(tool_output["active_access"]), 0)
         self.assertIn("message", tool_output["summary"])
-        self.assertIn("hint", tool_output["summary"])
+        self.assertIn("ciso_briefing", tool_output["summary"])
+        self.assertIn("Zero Red Hat personnel", tool_output["summary"]["ciso_briefing"])
+        self.assertIn("briefing_template", tool_output["summary"])
+        self.assertIn("monitoring", tool_output["summary"])
+        self.assertIn("pending_requests", tool_output["summary"])
+        self.assertIn("expired_requests", tool_output["summary"])
+
+    def test_audit_redhat_access_no_active_with_pending(self):
+        """Positive: audit_redhat_access shows pending count when no active access exists."""
+        # Change existing request to pending
+        for car in CrossAccountRequest.objects.all():
+            car.status = "pending"
+            car.save()
+
+        response = self._call_tool("audit_redhat_access")
+
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(len(tool_output["active_access"]), 0)
+        self.assertGreaterEqual(tool_output["summary"]["pending_requests"], 1)
+        self.assertIn("pending", tool_output["summary"]["ciso_briefing"])
 
     @patch("management.principal.proxy.PrincipalProxy.request_filtered_principals")
     def test_audit_redhat_access_include_inactive(self, mock_proxy):
@@ -3895,6 +4094,31 @@ class AuditRedhatAccessTests(MCPToolTestMixin, IdentityRequest):
 
         tool_output = self._get_tool_output(response)
         self.assertEqual(tool_output["summary"]["audit_period_days"], 7)
+
+    @override_settings(MCP_PII_REDACTION_ENABLED=False)
+    @patch("management.principal.proxy.PrincipalProxy.request_filtered_principals")
+    def test_audit_redhat_access_pii_visible_when_redaction_disabled(self, mock_proxy):
+        """Positive: audit_redhat_access returns full user_info when redaction is disabled via env var."""
+        mock_proxy.return_value = {
+            "status_code": 200,
+            "data": [
+                {
+                    "user_id": "10001",
+                    "first_name": "Test",
+                    "last_name": "User1",
+                    "email": "user1@example.com",
+                    "username": "testuser1",
+                },
+            ],
+        }
+
+        response = self._call_tool("audit_redhat_access")
+
+        tool_output = self._get_tool_output(response)
+        user1 = next(u for u in tool_output["active_access"] if u["user_info"]["user_id"] == "10001")
+        self.assertIn("name", user1["user_info"])
+        self.assertIn("email", user1["user_info"])
+        self.assertEqual(user1["user_info"]["email"], "user1@example.com")
 
 
 class MCPCheckRolePermissionsTests(MCPToolTestMixin, IdentityRequest):
@@ -4609,11 +4833,11 @@ class AuditGroupForDissolutionTests(MCPToolTestMixin, IdentityRequest):
         tool_output = self._get_tool_output(response)
 
         analysis = tool_output["analysis"]
-        # Users 1, 2, 3 are only in Legacy Ops + platform default - they're stranded
+        # Users 1, 2, 3 are only in Legacy Ops + platform default - they're stranded (identified by UUID)
         self.assertEqual(analysis["stranded_user_count"], 3)
-        self.assertIn("jen.park", analysis["stranded_users"])
-        self.assertIn("tomas.rivera", analysis["stranded_users"])
-        self.assertIn("priya.shah", analysis["stranded_users"])
+        self.assertIn(str(self.user1.uuid), analysis["stranded_users"])
+        self.assertIn(str(self.user2.uuid), analysis["stranded_users"])
+        self.assertIn(str(self.user3.uuid), analysis["stranded_users"])
 
     def test_audit_group_for_dissolution_identifies_stranded_service_accounts(self):
         """Positive: identifies service accounts that would lose all access."""
@@ -4621,10 +4845,10 @@ class AuditGroupForDissolutionTests(MCPToolTestMixin, IdentityRequest):
         tool_output = self._get_tool_output(response)
 
         analysis = tool_output["analysis"]
-        # Both service accounts are only in Legacy Ops - they're stranded
+        # Both service accounts are only in Legacy Ops - they're stranded (identified by UUID)
         self.assertEqual(analysis["stranded_service_account_count"], 2)
-        self.assertIn("svc-legacy-patcher", analysis["stranded_service_accounts"])
-        self.assertIn("svc-legacy-remediation", analysis["stranded_service_accounts"])
+        self.assertIn(str(self.svc1.uuid), analysis["stranded_service_accounts"])
+        self.assertIn(str(self.svc2.uuid), analysis["stranded_service_accounts"])
 
     def test_audit_group_for_dissolution_identifies_members_with_overlapping_access(self):
         """Positive: identifies members who have overlapping access via other groups."""
@@ -4632,8 +4856,8 @@ class AuditGroupForDissolutionTests(MCPToolTestMixin, IdentityRequest):
         tool_output = self._get_tool_output(response)
 
         analysis = tool_output["analysis"]
-        # User4 (alex.chen) is also in Engineering group
-        self.assertIn("alex.chen", analysis["members_with_overlapping_access"])
+        # User4 (alex.chen) is also in Engineering group — identified by UUID
+        self.assertIn(str(self.user4.uuid), analysis["members_with_overlapping_access"])
         self.assertEqual(analysis["members_with_overlapping_count"], 1)
 
     def test_audit_group_for_dissolution_shows_roles_and_permissions(self):
@@ -4662,14 +4886,15 @@ class AuditGroupForDissolutionTests(MCPToolTestMixin, IdentityRequest):
         members = tool_output["members"]
         self.assertEqual(len(members), 6)
 
-        # Find alex.chen who has overlapping access
-        alex = next(m for m in members if m["username"] == "alex.chen")
+        # Find alex.chen by UUID (PII redacted from responses)
+        alex = next(m for m in members if m["uuid"] == str(self.user4.uuid))
+        self.assertNotIn("username", alex)
         self.assertFalse(alex["is_stranded"])
         self.assertEqual(alex["non_default_group_count"], 1)
         self.assertIn("partial", alex["access_impact"])
 
-        # Find svc-legacy-patcher (service account)
-        svc = next(m for m in members if m["username"] == "svc-legacy-patcher")
+        # Find svc-legacy-patcher (service account) by UUID
+        svc = next(m for m in members if m["uuid"] == str(self.svc1.uuid))
         self.assertTrue(svc["is_stranded"])
         self.assertEqual(svc["type"], "service-account")
         self.assertEqual(svc["service_account_id"], "sa-12345")
@@ -4718,6 +4943,20 @@ class AuditGroupForDissolutionTests(MCPToolTestMixin, IdentityRequest):
         # Check for service account warning
         svc_warning = next(w for w in warnings if "service account" in w.lower())
         self.assertIn("403", svc_warning)
+
+    @override_settings(MCP_PII_REDACTION_ENABLED=False)
+    def test_audit_group_for_dissolution_pii_visible_when_redaction_disabled(self):
+        """Positive: audit_group_for_dissolution returns usernames when redaction is disabled via env var."""
+        response = self._call_tool("audit_group_for_dissolution", {"group_name": "Legacy Ops"})
+        tool_output = self._get_tool_output(response)
+
+        members = tool_output["members"]
+        alex = next(m for m in members if m["uuid"] == str(self.user4.uuid))
+        self.assertIn("username", alex)
+        self.assertEqual(alex["username"], "alex.chen")
+
+        analysis = tool_output["analysis"]
+        self.assertIn("jen.park", analysis["stranded_users"])
 
 
 @override_settings(BYPASS_BOP_VERIFICATION=True)
@@ -5875,7 +6114,7 @@ class MCPCrossAccountRequestTests(MCPToolTestMixin, IdentityRequest):
         response = self._call_tool(
             "create_cross_account_request",
             {
-                "target_account": "9999999",
+                "target_org": "9999999",
                 "start_date": "2026-06-01",
                 "end_date": "2026-06-30",
                 "roles": [str(self.role.uuid)],
@@ -6004,10 +6243,12 @@ class MCPGuideUserAccessDelegationTests(MCPToolTestMixin, IdentityRequest):
         self.assertIn("error", data)
         self.assertEqual(data["error"]["code"], -32000)
 
+    @patch("management.mcp_views._list_principals_by_name")
     @patch("management.mcp_views.list_principals")
-    def test_guide_user_access_delegation_nonexistent_user(self, mock_list_principals):
+    def test_guide_user_access_delegation_nonexistent_user(self, mock_list_principals, mock_name_search):
         """Edge case: guide_user_access_delegation handles non-existent user gracefully."""
         mock_list_principals.return_value = '{"data": []}'
+        mock_name_search.return_value = '{"data": []}'
 
         response = self._call_tool("guide_user_access_delegation", {"username": "nonexistent_user"})
 
@@ -6094,6 +6335,66 @@ class MCPGuideUserAccessDelegationTests(MCPToolTestMixin, IdentityRequest):
         group_names = [a["name"] for a in tool_output["existing_assignments"]]
         self.assertIn("Access Governance", group_names)
         self.assertIn("Security Team", group_names)
+
+    @patch("management.mcp_views._list_principals_by_name")
+    @patch("management.mcp_views.list_principals")
+    def test_guide_user_access_delegation_fuzzy_single_match(self, mock_list_principals, mock_name_search):
+        """Positive: fuzzy fallback resolves display name to single user."""
+        mock_list_principals.return_value = '{"data": []}'
+        mock_name_search.return_value = json.dumps(
+            {
+                "data": [
+                    {
+                        "username": self.test_username,
+                        "first_name": "Joe",
+                        "last_name": "Doe",
+                        "is_org_admin": False,
+                        "is_active": True,
+                    }
+                ]
+            }
+        )
+
+        response = self._call_tool("guide_user_access_delegation", {"username": "Joe"})
+
+        tool_output = self._get_tool_output(response)
+        self.assertEqual(tool_output["user_info"]["username"], self.test_username)
+        self.assertIn("resolved_from", tool_output["user_info"])
+
+    @patch("management.mcp_views._list_principals_by_name")
+    @patch("management.mcp_views.list_principals")
+    def test_guide_user_access_delegation_fuzzy_multiple_matches(self, mock_list_principals, mock_name_search):
+        """Edge case: fuzzy fallback returns candidates when multiple users match."""
+        mock_list_principals.return_value = '{"data": []}'
+        mock_name_search.return_value = json.dumps(
+            {
+                "data": [
+                    {"username": "joedoe1", "first_name": "Joe", "last_name": "Doe"},
+                    {"username": "joedoe2", "first_name": "Joe", "last_name": "Smith"},
+                ]
+            }
+        )
+
+        response = self._call_tool("guide_user_access_delegation", {"username": "Joe"})
+
+        tool_output = self._get_tool_output(response)
+        self.assertIn("error", tool_output["user_info"])
+        self.assertIn("candidates", tool_output["user_info"])
+        self.assertEqual(len(tool_output["user_info"]["candidates"]), 2)
+        self.assertIn("hint", tool_output["user_info"])
+
+    @patch("management.mcp_views._list_principals_by_name")
+    @patch("management.mcp_views.list_principals")
+    def test_guide_user_access_delegation_fuzzy_no_match(self, mock_list_principals, mock_name_search):
+        """Negative: fuzzy fallback returns error when no users match."""
+        mock_list_principals.return_value = '{"data": []}'
+        mock_name_search.return_value = '{"data": []}'
+
+        response = self._call_tool("guide_user_access_delegation", {"username": "Nonexistent"})
+
+        tool_output = self._get_tool_output(response)
+        self.assertIn("error", tool_output["user_info"])
+        self.assertNotIn("candidates", tool_output["user_info"])
 
     def test_guide_user_access_delegation_v1_org_version(self):
         """Positive: V1 organization shows org_version=v1."""
@@ -6952,6 +7253,100 @@ class MCPDeleteToolsV2Tests(MCPToolTestMixin, IdentityRequest):
         self.assertEqual(data["error"]["code"], -32000)
 
 
+class MCPHealthCheckTests(MCPToolTestMixin, IdentityRequest):
+    """Test the health_check MCP tool."""
+
+    def setUp(self):
+        """Set up health check tests."""
+        super().setUp()
+        self.url = "/_private/_a2s/mcp/"
+        self.client = APIClient()
+
+    @patch("management.mcp_views._check_redis")
+    def test_health_check_all_healthy(self, _mock_redis):
+        """health_check returns status ok when all checks pass."""
+        response = self._call_tool("health_check")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["result"]["isError"])
+        output = self._get_tool_output(response)
+        self.assertEqual(output["status"], "ok")
+        self.assertEqual(output["checks"]["tools"], "ok")
+        self.assertEqual(output["checks"]["database"], "ok")
+        self.assertEqual(output["checks"]["redis"], "ok")
+        self.assertNotIn("details", output)
+
+    @patch("management.mcp_views._check_redis")
+    def test_health_check_works_without_auth(self, _mock_redis):
+        """health_check does not require authentication."""
+        response = self._call_tool("health_check", use_auth=False)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("result", data)
+        self.assertFalse(data["result"]["isError"])
+        output = self._get_tool_output(response)
+        self.assertIn("status", output)
+        self.assertIn("checks", output)
+
+    @patch("management.mcp_views._check_redis")
+    @patch("management.mcp_views._check_database", side_effect=Exception("connection refused"))
+    def test_health_check_database_failure(self, _mock_db, _mock_redis):
+        """health_check returns degraded when database is unreachable."""
+        response = self._call_tool("health_check")
+
+        self.assertEqual(response.status_code, 200)
+        output = self._get_tool_output(response)
+        self.assertEqual(output["status"], "degraded")
+        self.assertEqual(output["checks"]["database"], "error")
+        self.assertEqual(output["details"]["database"], "unavailable")
+        # Other checks should still report independently
+        self.assertEqual(output["checks"]["tools"], "ok")
+
+    @patch("management.mcp_views._check_redis", side_effect=Exception("redis down"))
+    def test_health_check_redis_failure(self, _mock_redis):
+        """health_check returns degraded when Redis is unreachable."""
+        response = self._call_tool("health_check")
+
+        self.assertEqual(response.status_code, 200)
+        output = self._get_tool_output(response)
+        self.assertEqual(output["status"], "degraded")
+        self.assertEqual(output["checks"]["redis"], "error")
+        self.assertEqual(output["details"]["redis"], "unavailable")
+        self.assertEqual(output["checks"]["tools"], "ok")
+        self.assertEqual(output["checks"]["database"], "ok")
+
+    @patch("management.mcp_views._check_redis")
+    @patch("management.mcp_views._get_tools", side_effect=RuntimeError("event loop error"))
+    def test_health_check_tool_registry_failure(self, _mock_tools, _mock_redis):
+        """health_check returns degraded when tool registry cannot be resolved."""
+        response = self._call_tool("health_check")
+
+        self.assertEqual(response.status_code, 200)
+        output = self._get_tool_output(response)
+        self.assertEqual(output["status"], "degraded")
+        self.assertEqual(output["checks"]["tools"], "error")
+        self.assertEqual(output["details"]["tools"], "unavailable")
+
+    @patch("management.mcp_views._get_tools", side_effect=RuntimeError("tools broken"))
+    @patch("management.mcp_views._check_redis", side_effect=Exception("redis down"))
+    @patch("management.mcp_views._check_database", side_effect=Exception("db down"))
+    def test_health_check_all_degraded(self, _mock_db, _mock_redis, _mock_tools):
+        """health_check returns degraded with all checks failing."""
+        response = self._call_tool("health_check")
+
+        self.assertEqual(response.status_code, 200)
+        output = self._get_tool_output(response)
+        self.assertEqual(output["status"], "degraded")
+        self.assertEqual(output["checks"]["tools"], "error")
+        self.assertEqual(output["checks"]["database"], "error")
+        self.assertEqual(output["checks"]["redis"], "error")
+        self.assertEqual(len(output["details"]), 3)
+        for val in output["details"].values():
+            self.assertEqual(val, "unavailable")
+
+
 @override_settings(MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False)
 class MCPAuditLogSourceTests(MCPToolTestMixin, IdentityRequest):
     """Test that MCP write tools tag audit log entries with ai_assistant source."""
@@ -7062,11 +7457,12 @@ class MCPAccessCheckTests(MCPToolTestMixin, IdentityRequest):
     # --- ToolConfig ---
 
     def test_tool_config_has_permission_fields(self):
-        """ToolConfig includes required_relation, required_resource_type, and v1_permission."""
+        """ToolConfig includes required_relation, required_resource_type, v1_permission, and redacted_fields."""
         config = ToolConfig(fn=lambda: "")
         self.assertIsNone(config.required_relation)
         self.assertEqual(config.required_resource_type, "tenant")
         self.assertIsNone(config.v1_permission)
+        self.assertEqual(config.redacted_fields, ())
 
     def test_tool_config_with_permission_fields(self):
         """ToolConfig accepts all permission fields."""
@@ -7130,6 +7526,26 @@ class MCPAccessCheckTests(MCPToolTestMixin, IdentityRequest):
                 expected_perm,
                 f"Tool '{tool_name}' has wrong v1_permission: {config.v1_permission}",
             )
+
+    def test_principal_tools_have_redacted_fields(self):
+        """Tools handling principal data declare redacted_fields."""
+        expected_redacted = [
+            "list_principals",
+            "list_group_principals",
+            "investigate_tam_access",
+            "audit_redhat_access",
+            "audit_group_for_dissolution",
+            "get_user_state",
+        ]
+        for tool_name in expected_redacted:
+            config = _TOOL_CONFIG.get(tool_name)
+            self.assertIsNotNone(config, f"Tool '{tool_name}' not found in _TOOL_CONFIG")
+            self.assertTrue(
+                len(config.redacted_fields) > 0,
+                f"Tool '{tool_name}' should declare redacted_fields",
+            )
+            self.assertIn("email", config.redacted_fields, f"Tool '{tool_name}' should redact email")
+            self.assertIn("last_name", config.redacted_fields, f"Tool '{tool_name}' should redact last_name")
 
     def test_unprotected_tools_have_no_required_relation(self):
         """View-delegated tools do not have required_relation set."""
@@ -7688,3 +8104,648 @@ class MCPWritePreviewTests(MCPToolTestMixin, IdentityRequest):
         )
         self.assertIn("update group 'Dev Team'", msg)
         self.assertIn("Platform Team", msg)
+
+
+class MCPSchemaValidationTests(MCPToolTestMixin, IdentityRequest):
+    """Test JSON schema pre-validation of MCP tool arguments."""
+
+    def setUp(self):
+        """Set up schema validation tests."""
+        super().setUp()
+        self.url = "/_private/_a2s/mcp/"
+        self.client = APIClient()
+        self.principal = Principal.objects.create(username="test_user", tenant=self.tenant)
+
+    def tearDown(self):
+        """Tear down schema validation tests."""
+        Principal.objects.all().delete()
+        super().tearDown()
+
+    def _call_tool_raw(self, tool_name: str, arguments: dict) -> dict:
+        """Call tool and return the parsed JSON response."""
+        body = {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 200,
+            "params": {"name": tool_name, "arguments": arguments},
+        }
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response.json()
+
+    # --- Wrong type tests ---
+
+    def test_wrong_type_string_as_integer(self):
+        """Schema validation rejects string where integer is expected."""
+        data = self._call_tool_raw("hello", {"message": 123})
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32602)
+        self.assertIn("Expected", data["error"]["message"])
+        self.assertIn("string", data["error"]["message"])
+        self.assertNotIn("TypeError", data["error"]["message"])
+
+    def test_wrong_type_does_not_leak_internal_names(self):
+        """Schema validation error does not expose Python exception details."""
+        data = self._call_tool_raw("hello", {"message": ["not", "a", "string"]})
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32602)
+        self.assertNotIn("TypeError", data["error"]["message"])
+        self.assertNotIn("unexpected keyword", data["error"]["message"])
+        self.assertNotIn("traceback", data["error"]["message"].lower())
+
+    # --- Extra unknown arguments ---
+
+    def test_extra_unknown_argument_rejected(self):
+        """Schema validation rejects arguments not in the tool schema."""
+        data = self._call_tool_raw("hello", {"message": "hi", "unknown_param": "x"})
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32602)
+        self.assertIn("Unknown argument", data["error"]["message"])
+
+    def test_multiple_extra_arguments_rejected(self):
+        """Schema validation rejects even when valid args are mixed with extra ones."""
+        data = self._call_tool_raw("hello", {"message": "hi", "foo": 1, "bar": 2})
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32602)
+
+    # --- Missing required arguments ---
+
+    def test_missing_required_argument_rejected(self):
+        """Schema validation rejects calls missing required arguments."""
+        data = self._call_tool_raw("get_role", {})
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32602)
+        self.assertIn("Missing required argument", data["error"]["message"])
+
+    # --- Valid arguments pass through ---
+
+    def test_valid_arguments_pass_validation(self):
+        """Schema validation allows valid arguments through to tool execution."""
+        data = self._call_tool_raw("hello", {"message": "Hi there!"})
+        self.assertIn("result", data)
+        self.assertNotIn("error", data)
+        output = json.loads(data["result"]["content"][0]["text"])
+        self.assertIn("Hi there!", output["response"])
+
+    def test_valid_arguments_with_defaults_omitted(self):
+        """Schema validation passes when optional arguments are omitted."""
+        data = self._call_tool_raw("hello", {})
+        self.assertIn("result", data)
+        self.assertNotIn("error", data)
+
+    # --- Unit tests for _sanitize_validation_error ---
+
+    def test_sanitize_type_error(self):
+        """_sanitize_validation_error formats type errors cleanly."""
+        import jsonschema as js
+
+        schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+        try:
+            js.validate({"name": 42}, schema)
+        except js.ValidationError as exc:
+            msg = _sanitize_validation_error(exc)
+            self.assertIn("Expected", msg)
+            self.assertIn("string", msg)
+            self.assertIn("int", msg)
+
+    def test_sanitize_required_error(self):
+        """_sanitize_validation_error formats required errors cleanly."""
+        import jsonschema as js
+
+        schema = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+        try:
+            js.validate({}, schema)
+        except js.ValidationError as exc:
+            msg = _sanitize_validation_error(exc)
+            self.assertEqual(msg, "Missing required argument: name")
+
+    def test_sanitize_additional_properties_error(self):
+        """_sanitize_validation_error formats additionalProperties errors cleanly."""
+        import jsonschema as js
+
+        schema = {"type": "object", "properties": {"name": {"type": "string"}}, "additionalProperties": False}
+        try:
+            js.validate({"name": "ok", "extra": "bad"}, schema)
+        except js.ValidationError as exc:
+            msg = _sanitize_validation_error(exc)
+            self.assertIn("Unknown argument", msg)
+
+    # --- Unit test for _validate_tool_arguments ---
+
+    def test_validate_unknown_tool_returns_none(self):
+        """_validate_tool_arguments returns None for tools with no schema."""
+        result = _validate_tool_arguments("nonexistent_tool_xyz", {"anything": True})
+        self.assertIsNone(result)
+
+    def test_validate_valid_returns_none(self):
+        """_validate_tool_arguments returns None for valid arguments."""
+        result = _validate_tool_arguments("hello", {"message": "test"})
+        self.assertIsNone(result)
+
+    def test_validate_invalid_returns_message(self):
+        """_validate_tool_arguments returns error message for invalid arguments."""
+        result = _validate_tool_arguments("hello", {"message": 999})
+        self.assertIsNotNone(result)
+        self.assertIn("string", result)
+
+
+class MCPWritePayloadValidationUnitTests(IdentityRequest):
+    """Unit tests for write payload validation helper functions."""
+
+    _VALID_UUID = "550e8400-e29b-41d4-a716-446655440000"
+    _VALID_UUID2 = "550e8400-e29b-41d4-a716-446655440001"
+    _VALID_UUID3 = "550e8400-e29b-41d4-a716-446655440002"
+
+    # --- _validate_permission_format ---
+
+    def test_valid_permission_format(self):
+        """Valid 'app:resource:verb' permission passes."""
+        self.assertIsNone(_validate_permission_format("cost-management:cost_model:read"))
+
+    def test_valid_permission_with_wildcard(self):
+        """Wildcard permission passes."""
+        self.assertIsNone(_validate_permission_format("cost-management:*:*"))
+
+    def test_permission_missing_colon(self):
+        """Permission with fewer than 3 parts is rejected."""
+        result = _validate_permission_format("cost-management:cost_model")
+        self.assertIsNotNone(result)
+        self.assertIn("malformed", result)
+        self.assertIn("application:resource_type:verb", result)
+
+    def test_permission_too_many_parts(self):
+        """Permission with more than 3 parts is rejected."""
+        result = _validate_permission_format("a:b:c:d")
+        self.assertIsNotNone(result)
+        self.assertIn("malformed", result)
+
+    def test_permission_empty_part(self):
+        """Permission with empty segment is rejected."""
+        result = _validate_permission_format("cost-management::read")
+        self.assertIsNotNone(result)
+        self.assertIn("empty", result)
+
+    def test_permission_whitespace_padded(self):
+        """Permission with whitespace-padded segment is rejected."""
+        result = _validate_permission_format("cost-management: cost_model:read")
+        self.assertIsNotNone(result)
+        self.assertIn("whitespace", result)
+
+    def test_permission_single_string(self):
+        """Permission with no colons is rejected."""
+        result = _validate_permission_format("readall")
+        self.assertIsNotNone(result)
+        self.assertIn("malformed", result)
+
+    # --- _validate_v2_permission ---
+
+    def test_valid_v2_permission(self):
+        """V2 permission with all required fields passes."""
+        perm = {"application": "cost-management", "resource_type": "cost_model", "operation": "read"}
+        self.assertIsNone(_validate_v2_permission(perm, 0))
+
+    def test_v2_permission_missing_operation(self):
+        """V2 permission missing 'operation' is rejected."""
+        perm = {"application": "cost-management", "resource_type": "cost_model"}
+        result = _validate_v2_permission(perm, 0)
+        self.assertIsNotNone(result)
+        self.assertIn("operation", result)
+        self.assertIn("permissions[0]", result)
+
+    def test_v2_permission_empty_application(self):
+        """V2 permission with empty application is rejected."""
+        perm = {"application": "", "resource_type": "cost_model", "operation": "read"}
+        result = _validate_v2_permission(perm, 1)
+        self.assertIsNotNone(result)
+        self.assertIn("application", result)
+        self.assertIn("permissions[1]", result)
+
+    def test_v2_permission_whitespace_only(self):
+        """V2 permission with whitespace-only resource_type is rejected."""
+        perm = {"application": "app", "resource_type": "   ", "operation": "read"}
+        result = _validate_v2_permission(perm, 0)
+        self.assertIsNotNone(result)
+        self.assertIn("resource_type", result)
+
+    # --- _validate_uuid_field ---
+
+    def test_valid_uuid(self):
+        """Valid UUID passes."""
+        self.assertIsNone(_validate_uuid_field(self._VALID_UUID, "role_uuid"))
+
+    def test_invalid_uuid(self):
+        """Non-UUID string is rejected."""
+        result = _validate_uuid_field("not-a-uuid", "role_uuid")
+        self.assertIsNotNone(result)
+        self.assertIn("role_uuid", result)
+        self.assertIn("not a valid UUID", result)
+
+    def test_empty_uuid_passes(self):
+        """Empty string UUID passes (optional field)."""
+        self.assertIsNone(_validate_uuid_field("", "role_uuid"))
+
+    # --- _validate_uuid_list ---
+
+    def test_uuid_list_valid(self):
+        """List of valid UUIDs passes."""
+        self.assertIsNone(_validate_uuid_list([self._VALID_UUID, self._VALID_UUID2], "ids"))
+
+    def test_uuid_list_invalid_at_index_zero(self):
+        """Invalid UUID at index 0 returns error naming ids[0]."""
+        result = _validate_uuid_list(["bad-uuid", self._VALID_UUID], "ids")
+        self.assertIsNotNone(result)
+        self.assertIn("ids[0]", result)
+
+    def test_uuid_list_invalid_at_later_index(self):
+        """Invalid UUID at a later position includes the correct index in the error."""
+        result = _validate_uuid_list([self._VALID_UUID, "bad-uuid"], "ids")
+        self.assertIsNotNone(result)
+        self.assertIn("ids[1]", result)
+
+    def test_uuid_list_empty_passes(self):
+        """Empty list passes."""
+        self.assertIsNone(_validate_uuid_list([], "ids"))
+
+    def test_uuid_list_none_passes(self):
+        """None passes (treated as empty)."""
+        self.assertIsNone(_validate_uuid_list(None, "ids"))
+
+    # --- _validate_write_payload ---
+
+    def test_unknown_tool_passes(self):
+        """Unknown tools pass validation (no rules to apply)."""
+        self.assertIsNone(_validate_write_payload("unknown_tool_xyz", {}))
+
+    def test_create_role_v1_valid(self):
+        """Valid create_role_v1 payload passes."""
+        args = {
+            "name": "Cost Reader",
+            "access": [{"permission": "cost-management:cost_model:read"}],
+        }
+        self.assertIsNone(_validate_write_payload("create_role_v1", args))
+
+    def test_create_role_v1_malformed_permission(self):
+        """create_role_v1 with malformed permission string is rejected."""
+        args = {
+            "name": "Bad Role",
+            "access": [{"permission": "cost-management:cost_model"}],
+        }
+        result = _validate_write_payload("create_role_v1", args)
+        self.assertIsNotNone(result)
+        self.assertIn("malformed", result)
+        self.assertIn("access[0]", result)
+
+    def test_create_role_v1_at_max_permissions(self):
+        """create_role_v1 with exactly the max number of permissions passes."""
+        access = [{"permission": f"app:res:verb{i}"} for i in range(_MAX_PERMISSIONS_PER_ROLE)]
+        self.assertIsNone(_validate_write_payload("create_role_v1", {"name": "Big Role", "access": access}))
+
+    def test_create_role_v1_exceeds_max_permissions(self):
+        """create_role_v1 with too many permissions is rejected."""
+        access = [{"permission": f"app:res:verb{i}"} for i in range(_MAX_PERMISSIONS_PER_ROLE + 1)]
+        args = {"name": "Huge Role", "access": access}
+        result = _validate_write_payload("create_role_v1", args)
+        self.assertIsNotNone(result)
+        self.assertIn("exceeds the maximum", result)
+        self.assertIn(str(_MAX_PERMISSIONS_PER_ROLE), result)
+
+    def test_update_role_v1_invalid_uuid(self):
+        """update_role_v1 with invalid role_uuid is rejected."""
+        args = {
+            "role_uuid": "not-a-uuid",
+            "name": "Updated",
+            "access": [{"permission": "app:res:read"}],
+        }
+        result = _validate_write_payload("update_role_v1", args)
+        self.assertIsNotNone(result)
+        self.assertIn("role_uuid", result)
+        self.assertIn("not a valid UUID", result)
+
+    def test_create_role_v2_valid(self):
+        """Valid create_role (V2) payload passes."""
+        args = {
+            "name": "Cost Reader",
+            "permissions": [{"application": "cost-management", "resource_type": "cost_model", "operation": "read"}],
+        }
+        self.assertIsNone(_validate_write_payload("create_role", args))
+
+    def test_create_role_v2_missing_operation(self):
+        """create_role (V2) with missing operation is rejected."""
+        args = {
+            "name": "Bad Role",
+            "permissions": [{"application": "app", "resource_type": "res"}],
+        }
+        result = _validate_write_payload("create_role", args)
+        self.assertIsNotNone(result)
+        self.assertIn("operation", result)
+
+    def test_add_roles_to_group_invalid_group_uuid(self):
+        """add_roles_to_group with invalid group_uuid is rejected."""
+        result = _validate_write_payload("add_roles_to_group", {"group_uuid": "bad-uuid", "roles": [self._VALID_UUID]})
+        self.assertIsNotNone(result)
+        self.assertIn("group_uuid", result)
+        self.assertIn("not a valid UUID", result)
+
+    def test_add_roles_to_group_invalid_role_uuid(self):
+        """add_roles_to_group with invalid role UUID in roles list is rejected."""
+        result = _validate_write_payload(
+            "add_roles_to_group", {"group_uuid": self._VALID_UUID, "roles": ["not-a-uuid"]}
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("roles[0]", result)
+
+    def test_create_role_bindings_invalid_uuid(self):
+        """create_role_bindings with invalid role UUID is rejected."""
+        args = {
+            "bindings": [
+                {
+                    "role": "not-a-uuid",
+                    "resource": {"type": "workspace", "id": self._VALID_UUID},
+                    "subject": {"type": "principal", "id": self._VALID_UUID2},
+                }
+            ],
+        }
+        result = _validate_write_payload("create_role_bindings", args)
+        self.assertIsNotNone(result)
+        self.assertIn("bindings[0].role", result)
+        self.assertIn("not a valid UUID", result)
+
+    def test_create_role_bindings_invalid_subject_id(self):
+        """create_role_bindings with invalid subject.id is rejected."""
+        args = {
+            "bindings": [
+                {
+                    "role": self._VALID_UUID,
+                    "resource": {"type": "workspace", "id": self._VALID_UUID2},
+                    "subject": {"type": "principal", "id": "bad-subject-id"},
+                }
+            ],
+        }
+        result = _validate_write_payload("create_role_bindings", args)
+        self.assertIsNotNone(result)
+        self.assertIn("bindings[0].subject.id", result)
+        self.assertIn("not a valid UUID", result)
+
+    def test_create_role_bindings_valid(self):
+        """create_role_bindings with valid UUIDs passes."""
+        args = {
+            "bindings": [
+                {
+                    "role": self._VALID_UUID,
+                    "resource": {"type": "workspace", "id": self._VALID_UUID2},
+                    "subject": {"type": "principal", "id": self._VALID_UUID3},
+                }
+            ],
+        }
+        self.assertIsNone(_validate_write_payload("create_role_bindings", args))
+
+    def test_bulk_delete_roles_invalid_uuid(self):
+        """bulk_delete_roles with invalid UUID in ids is rejected."""
+        result = _validate_write_payload("bulk_delete_roles", {"ids": ["valid-looking", "not-uuid"]})
+        self.assertIsNotNone(result)
+        self.assertIn("ids[0]", result)
+        self.assertIn("not a valid UUID", result)
+
+    def test_delete_workspace_invalid_uuid(self):
+        """delete_workspace with invalid workspace_uuid is rejected."""
+        result = _validate_write_payload("delete_workspace", {"workspace_uuid": "bad"})
+        self.assertIsNotNone(result)
+        self.assertIn("workspace_uuid", result)
+
+    def test_update_role_binding_invalid_subject_id(self):
+        """update_role_binding with invalid subject_id is rejected."""
+        args = {
+            "resource_id": self._VALID_UUID,
+            "subject_id": "not-valid",
+            "subject_type": "principal",
+            "roles": [{"id": self._VALID_UUID2}],
+        }
+        result = _validate_write_payload("update_role_binding", args)
+        self.assertIsNotNone(result)
+        self.assertIn("subject_id", result)
+
+    def test_patch_cross_account_request_invalid_uuid(self):
+        """patch_cross_account_request with invalid request_id is rejected."""
+        result = _validate_write_payload("patch_cross_account_request", {"request_id": "xyz"})
+        self.assertIsNotNone(result)
+        self.assertIn("request_id", result)
+
+
+@override_settings(
+    MCP_WRITE_ENABLED=True, MCP_WRITE_CONFIRMATION=False, V2_APIS_ENABLED=True, ATOMIC_RETRY_DISABLED=True
+)
+class MCPWritePayloadValidationIntegrationTests(MCPToolTestMixin, IdentityRequest):
+    """Integration tests: write payload validation through the full MCP endpoint."""
+
+    def setUp(self):
+        """Set up write payload validation integration tests."""
+        reload(urls)
+        clear_url_caches()
+        super().setUp()
+        self.url = "/_private/_a2s/mcp/"
+        self.client = APIClient()
+        self.principal = Principal.objects.create(username="test_user", tenant=self.tenant)
+
+    def tearDown(self):
+        """Tear down write payload validation integration tests."""
+        Principal.objects.all().delete()
+        super().tearDown()
+        reload(urls)
+        clear_url_caches()
+
+    def _call_tool_raw(self, tool_name: str, arguments: dict) -> dict:
+        """Call tool and return the parsed JSON response."""
+        body = {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 300,
+            "params": {"name": tool_name, "arguments": arguments},
+        }
+        response = self.client.post(self.url, data=json.dumps(body), content_type="application/json", **self.headers)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response.json()
+
+    def test_malformed_permission_rejected_via_endpoint(self):
+        """Malformed permission string rejected through the MCP endpoint."""
+        data = self._call_tool_raw(
+            "create_role_v1",
+            {"name": "Bad Role", "access": [{"permission": "only-two-parts:read"}]},
+        )
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32602)
+        self.assertIn("malformed", data["error"]["message"])
+        self.assertIn("application:resource_type:verb", data["error"]["message"])
+
+    def test_invalid_uuid_rejected_via_endpoint(self):
+        """Invalid UUID rejected through the MCP endpoint."""
+        data = self._call_tool_raw("delete_role_v1", {"role_uuid": "not-a-valid-uuid"})
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32602)
+        self.assertIn("not a valid UUID", data["error"]["message"])
+
+    def test_max_permissions_rejected_via_endpoint(self):
+        """Too many permissions rejected through the MCP endpoint."""
+        access = [{"permission": f"app:res:verb{i}"} for i in range(_MAX_PERMISSIONS_PER_ROLE + 1)]
+        data = self._call_tool_raw("create_role_v1", {"name": "Big Role", "access": access})
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32602)
+        self.assertIn("exceeds the maximum", data["error"]["message"])
+
+    def test_valid_payload_passes_through(self):
+        """Valid write payload passes semantic validation and does not return a -32602 error."""
+        data = self._call_tool_raw(
+            "create_role_v1",
+            {"name": "Good Role", "access": [{"permission": "app:resource:read"}]},
+        )
+        # Validation passed — may succeed or fail downstream, but must not be a validation error.
+        if "error" in data:
+            self.assertNotEqual(data["error"]["code"], -32602, msg=f"Unexpected validation error: {data}")
+
+    def test_v2_valid_payload_passes_through(self):
+        """Valid create_role (V2) payload passes semantic validation."""
+        data = self._call_tool_raw(
+            "create_role",
+            {
+                "name": "Good V2 Role",
+                "permissions": [
+                    {"application": "cost-management", "resource_type": "cost_model", "operation": "read"}
+                ],
+            },
+        )
+        if "error" in data:
+            self.assertNotEqual(data["error"]["code"], -32602, msg=f"Unexpected validation error: {data}")
+
+    def test_v2_permission_missing_field_rejected(self):
+        """V2 permission with missing field rejected through endpoint."""
+        data = self._call_tool_raw(
+            "create_role",
+            {"name": "Bad V2 Role", "permissions": [{"application": "app"}]},
+        )
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32602)
+        self.assertIn("resource_type", data["error"]["message"])
+
+    def test_bulk_delete_invalid_uuids_rejected(self):
+        """bulk_delete_roles with invalid UUIDs rejected through endpoint."""
+        data = self._call_tool_raw("bulk_delete_roles", {"ids": ["abc", "def"]})
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32602)
+        self.assertIn("not a valid UUID", data["error"]["message"])
+
+    def test_create_role_bindings_invalid_resource_id(self):
+        """create_role_bindings with invalid resource UUID rejected."""
+        data = self._call_tool_raw(
+            "create_role_bindings",
+            {
+                "bindings": [
+                    {
+                        "role": "550e8400-e29b-41d4-a716-446655440000",
+                        "resource": {"type": "workspace", "id": "bad-uuid"},
+                        "subject": {"type": "principal", "id": "550e8400-e29b-41d4-a716-446655440001"},
+                    }
+                ]
+            },
+        )
+        self.assertIn("error", data)
+        self.assertEqual(data["error"]["code"], -32602)
+        self.assertIn("bindings[0].resource.id", data["error"]["message"])
+
+
+class MCPHealthCheckTests(IdentityRequest):
+    """Test the MCP readiness probe endpoint at /_private/_a2s/mcp/health/."""
+
+    def setUp(self):
+        """Set up health check tests."""
+        super().setUp()
+        self.url = "/_private/_a2s/mcp/health/"
+        self.client = APIClient()
+        _shutdown_in_progress.clear()
+
+    def tearDown(self):
+        """Ensure shutdown flag is cleared after each test."""
+        _shutdown_in_progress.clear()
+        super().tearDown()
+
+    def test_health_returns_ok(self):
+        """Positive: readiness endpoint returns 200 when not shutting down."""
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+
+    def test_health_returns_503_during_shutdown(self):
+        """Negative: readiness endpoint returns 503 when shutdown is in progress."""
+        _shutdown_in_progress.set()
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {"status": "shutting_down"})
+
+    def test_health_no_auth_required(self):
+        """Positive: readiness endpoint does not require identity headers."""
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+
+    def test_health_post_allowed(self):
+        """Positive: readiness endpoint responds to POST as well (for flexible probes)."""
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+
+    def test_mcp_post_returns_error_during_shutdown(self):
+        """Negative: MCP endpoint returns JSON-RPC error when shutdown is in progress."""
+        _shutdown_in_progress.set()
+        mcp_url = "/_private/_a2s/mcp/"
+        payload = {"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+        response = self.client.post(mcp_url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn("error", body)
+        self.assertEqual(body["error"]["code"], -32000)
+        self.assertIn("shutting down", body["error"]["message"])
+
+
+class MCPShutdownTests(IdentityRequest):
+    """Test the mcp_shutdown() function."""
+
+    def setUp(self):
+        """Set up shutdown tests."""
+        super().setUp()
+        _shutdown_in_progress.clear()
+
+    def tearDown(self):
+        """Ensure shutdown flag is cleared after each test."""
+        _shutdown_in_progress.clear()
+        super().tearDown()
+
+    @patch("management.mcp_views._MCP_TOOL_EXECUTOR")
+    @patch("management.mcp_views._get_connection_pool")
+    def test_shutdown_sets_flag_and_cleans_up(self, mock_get_pool, mock_executor):
+        """Positive: mcp_shutdown sets the event flag and calls shutdown/disconnect."""
+        mock_pool = mock_get_pool.return_value
+        mcp_shutdown()
+
+        self.assertTrue(_shutdown_in_progress.is_set())
+        mock_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+        mock_pool.disconnect.assert_called_once()
+
+    @patch("management.mcp_views._MCP_TOOL_EXECUTOR")
+    @patch("management.mcp_views._get_connection_pool")
+    def test_shutdown_is_idempotent(self, mock_get_pool, mock_executor):
+        """Edge case: calling mcp_shutdown twice only executes cleanup once."""
+        mock_pool = mock_get_pool.return_value
+        mcp_shutdown()
+        mcp_shutdown()
+
+        mock_executor.shutdown.assert_called_once()
+        mock_pool.disconnect.assert_called_once()
+
+    @patch("management.mcp_views._MCP_TOOL_EXECUTOR")
+    @patch("management.mcp_views._get_connection_pool")
+    def test_shutdown_survives_redis_disconnect_error(self, mock_get_pool, mock_executor):
+        """Edge case: Redis disconnect failure does not prevent shutdown."""
+        mock_pool = mock_get_pool.return_value
+        mock_pool.disconnect.side_effect = ConnectionError("pool gone")
+
+        mcp_shutdown()
+
+        self.assertTrue(_shutdown_in_progress.is_set())
+        mock_executor.shutdown.assert_called_once()

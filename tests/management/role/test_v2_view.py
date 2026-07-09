@@ -19,6 +19,7 @@
 import uuid
 from collections.abc import Iterable
 from importlib import reload
+from urllib.parse import urlencode
 from unittest.mock import ANY, patch
 
 from django.conf import settings
@@ -85,17 +86,17 @@ class RoleV2RetrieveViewTest(IdentityRequest):
             )
         )
 
-        # Create permissions
+        # Create permissions (use test-namespaced names to avoid conflicts with seed_roles())
         self.permission1 = Permission.objects.create(
-            permission="inventory:hosts:read",
+            permission="testapp:hosts:read",
             tenant=self.tenant,
         )
         self.permission2 = Permission.objects.create(
-            permission="inventory:hosts:write",
+            permission="testapp:hosts:write",
             tenant=self.tenant,
         )
         self.permission3 = Permission.objects.create(
-            permission="cost:reports:read",
+            permission="testapp:reports:read",
             tenant=self.tenant,
         )
 
@@ -146,9 +147,9 @@ class RoleV2RetrieveViewTest(IdentityRequest):
         # Verify permissions
         self.assertEqual(len(data["permissions"]), 2)
         permission_strings = {f"{p['application']}:{p['resource_type']}:{p['operation']}" for p in data["permissions"]}
-        self.assertEqual(permission_strings, {"inventory:hosts:read", "inventory:hosts:write"})
+        self.assertEqual(permission_strings, {"testapp:hosts:read", "testapp:hosts:write"})
 
-    @override_settings(V2_MIGRATION_APP_EXCLUDE_LIST=["cost"])
+    @override_settings(V2_MIGRATION_APP_EXCLUDE_LIST=["testapp"])
     def test_retrieve_excluded_app_role_returns_404(self):
         """Test that retrieving a role whose permissions are all from an excluded app returns 404."""
         v2_role_excluded_application_permission_ids_cache.invalidate()
@@ -158,7 +159,7 @@ class RoleV2RetrieveViewTest(IdentityRequest):
                 description="Has only excluded-app permissions",
                 tenant=self.tenant,
             )
-            excluded_role.permissions.add(self.permission3)  # cost:reports:read
+            excluded_role.permissions.add(self.permission3)  # testapp:reports:read
 
             url = self._get_role_url(excluded_role.uuid)
             response = self.client.get(url, **self.headers)
@@ -237,9 +238,9 @@ class RoleV2RetrieveViewTest(IdentityRequest):
             self.assertIn("operation", permission)
 
             # Permission strings should be split correctly
-            # inventory:hosts:read -> application=inventory, resource_type=hosts, operation=read
-            if permission["application"] == "inventory":
-                self.assertEqual(permission["resource_type"], "hosts")
+            # testapp:hosts:read -> application=testapp, resource_type=hosts, operation=read
+            if permission["application"] == "testapp":
+                self.assertIn(permission["resource_type"], ["hosts", "reports"])
                 self.assertIn(permission["operation"], ["read", "write"])
 
     def test_retrieve_role_with_no_permissions(self):
@@ -315,10 +316,10 @@ class RoleV2RetrieveViewTest(IdentityRequest):
             tenant=self.tenant,
         )
         # Add permissions in non-alphabetical order
-        # Expected alphabetical order: cost:reports:read, inventory:hosts:read, inventory:hosts:write
-        ordered_role.permissions.add(self.permission2)  # inventory:hosts:write
-        ordered_role.permissions.add(self.permission3)  # cost:reports:read
-        ordered_role.permissions.add(self.permission1)  # inventory:hosts:read
+        # Expected alphabetical order: testapp:hosts:read, testapp:hosts:write, testapp:reports:read
+        ordered_role.permissions.add(self.permission2)  # testapp:hosts:write
+        ordered_role.permissions.add(self.permission3)  # testapp:reports:read
+        ordered_role.permissions.add(self.permission1)  # testapp:hosts:read
 
         url = self._get_role_url(ordered_role.uuid)
         response = self.client.get(url, **self.headers)
@@ -328,7 +329,7 @@ class RoleV2RetrieveViewTest(IdentityRequest):
 
         # Verify permissions are sorted alphabetically
         permission_strings = [f"{p['application']}:{p['resource_type']}:{p['operation']}" for p in data["permissions"]]
-        self.assertEqual(permission_strings, ["cost:reports:read", "inventory:hosts:read", "inventory:hosts:write"])
+        self.assertEqual(permission_strings, ["testapp:hosts:read", "testapp:hosts:write", "testapp:reports:read"])
 
         ordered_role.delete()
 
@@ -416,9 +417,9 @@ class RoleV2RetrieveViewTest(IdentityRequest):
             "name": "Consistency Test Role",
             "description": "Testing create/retrieve consistency",
             "permissions": [
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
-                {"application": "cost", "resource_type": "reports", "operation": "read"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "reports", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "read"},
             ],
         }
 
@@ -433,7 +434,7 @@ class RoleV2RetrieveViewTest(IdentityRequest):
         create_permissions = [
             f"{p['application']}:{p['resource_type']}:{p['operation']}" for p in create_response.data["permissions"]
         ]
-        self.assertEqual(create_permissions, ["inventory:hosts:write", "cost:reports:read", "inventory:hosts:read"])
+        self.assertEqual(create_permissions, ["testapp:hosts:write", "testapp:reports:read", "testapp:hosts:read"])
 
         # Retrieve the same role
         retrieve_url = reverse("v2_management:roles-detail", kwargs={"uuid": role_id})
@@ -444,7 +445,7 @@ class RoleV2RetrieveViewTest(IdentityRequest):
         retrieve_permissions = [
             f"{p['application']}:{p['resource_type']}:{p['operation']}" for p in retrieve_response.data["permissions"]
         ]
-        self.assertEqual(retrieve_permissions, ["cost:reports:read", "inventory:hosts:read", "inventory:hosts:write"])
+        self.assertEqual(retrieve_permissions, ["testapp:hosts:read", "testapp:hosts:write", "testapp:reports:read"])
 
         # Both should have same permission set, just different order
         self.assertEqual(set(create_permissions), set(retrieve_permissions))
@@ -486,13 +487,13 @@ class RoleV2ViewSetTests(IdentityRequest):
         self.list_url = f"{self.url}?resource_type=workspace"
         self.delete_url = reverse("v2_management:roles-bulk-destroy")
 
-        # Create test permissions
+        # Create test permissions (use test-namespaced names to avoid conflicts with seed_roles())
         self.permission1 = Permission.objects.create(permission="test:resource:read", tenant=self.tenant)
-        self.permission2 = Permission.objects.create(permission="inventory:hosts:read", tenant=self.tenant)
-        self.permission3 = Permission.objects.create(permission="inventory:hosts:write", tenant=self.tenant)
-        self.permission4 = Permission.objects.create(permission="cost:reports:read", tenant=self.tenant)
+        self.permission2 = Permission.objects.create(permission="testapp:hosts:read", tenant=self.tenant)
+        self.permission3 = Permission.objects.create(permission="testapp:hosts:write", tenant=self.tenant)
+        self.permission4 = Permission.objects.create(permission="testapp:reports:read", tenant=self.tenant)
 
-        self.permission1_data = {"application": "inventory", "resource_type": "hosts", "operation": "read"}
+        self.permission1_data = {"application": "testapp", "resource_type": "hosts", "operation": "read"}
 
         # Create a role for list tests
         self.role = RoleV2.objects.create(name="test_role", description="Test description", tenant=self.tenant)
@@ -842,7 +843,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         role_without_perm = RoleV2.objects.create(name="no_match_role", tenant=self.tenant)
         role_without_perm.permissions.add(self.permission4)
 
-        url = f"{self.list_url}&permission=inventory:hosts:read"
+        url = f"{self.list_url}&permission=testapp:hosts:read"
         response = self.client.get(url, **self.headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -858,7 +859,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         role_b = RoleV2.objects.create(name="cost_reader", tenant=self.tenant)
         role_b.permissions.add(self.permission4)
 
-        url = f"{self.list_url}&permission=inventory:hosts:read,cost:reports:read"
+        url = f"{self.list_url}&permission=testapp:hosts:read,testapp:reports:read"
         response = self.client.get(url, **self.headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -879,7 +880,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         role = RoleV2.objects.create(name="multi_perm_role", tenant=self.tenant)
         role.permissions.add(self.permission2, self.permission3)
 
-        url = f"{self.list_url}&permission=inventory:hosts:read,inventory:hosts:write"
+        url = f"{self.list_url}&permission=testapp:hosts:read,testapp:hosts:write"
         response = self.client.get(url, **self.headers)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -1039,11 +1040,69 @@ class RoleV2ViewSetTests(IdentityRequest):
         self.assertIn("test_role", names)
         self.assertNotIn("root_scoped", names)
 
-    def test_list_roles_resource_id_invalid_uuid_returns_400(self):
-        """Invalid resource_id is rejected before listing."""
+    def test_list_roles_resource_id_invalid_uuid_returns_400_for_workspace(self):
+        """Invalid resource_id is rejected for workspace before listing."""
         url = f"{self.url}?resource_type=workspace&resource_id=not-a-uuid"
         response = self.client.get(url, **self.headers)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @patch(CACHE_PATCH_TARGET, _scope_cache(tenant_perms="tenant_app:*:*"))
+    def test_list_roles_tenant_resource_id_accepted(self):
+        """Tenant resource_id (domain/org_id) is accepted for resource_type=tenant."""
+        tenant_perm = Permission.objects.create(permission="tenant_app:res:read", tenant=self.tenant)
+        tenant_role = RoleV2.objects.create(name="tenant_role", description="Tenant", tenant=self.tenant)
+        tenant_role.permissions.add(tenant_perm)
+
+        tenant_resource_id = self.tenant.tenant_resource_id()
+        url = f"{self.url}?{urlencode({'resource_type': 'tenant', 'resource_id': tenant_resource_id})}"
+        response = self.client.get(url, **self.headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        names = {r["name"] for r in response.data["data"]}
+        self.assertIn("tenant_role", names)
+
+    @patch(
+        CACHE_PATCH_TARGET,
+        _scope_cache(tenant_perms="tenant_app:*:*", default_perms="inventory:hosts:read"),
+    )
+    def test_list_roles_resource_type_tenant_includes_custom_tenant_scoped_role(self):
+        """resource_type=tenant returns custom roles whose highest scope is tenant."""
+        tenant_perm = Permission.objects.create(permission="tenant_app:res:read", tenant=self.tenant)
+        custom_tenant_role = CustomRoleV2.objects.create(
+            name="custom_tenant_role",
+            description="Custom tenant scoped",
+            tenant=self.tenant,
+        )
+        custom_tenant_role.permissions.add(tenant_perm)
+
+        custom_workspace_role = CustomRoleV2.objects.create(
+            name="custom_workspace_role",
+            description="Custom workspace scoped",
+            tenant=self.tenant,
+        )
+        custom_workspace_role.permissions.add(self.permission2)
+
+        url = f"{self.url}?resource_type=tenant"
+        response = self.client.get(url, **self.headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        names = {r["name"] for r in response.data["data"]}
+        self.assertIn("custom_tenant_role", names)
+        self.assertNotIn("custom_workspace_role", names)
+
+    @patch(CACHE_PATCH_TARGET, _scope_cache(tenant_perms="tenant_app:*:*"))
+    def test_list_roles_resource_tenant_org_id_accepted(self):
+        """resource.tenant.org_id resolves to tenant resource_id like role bindings."""
+        tenant_perm = Permission.objects.create(permission="tenant_app:res:read", tenant=self.tenant)
+        tenant_role = RoleV2.objects.create(name="tenant_role", description="Tenant", tenant=self.tenant)
+        tenant_role.permissions.add(tenant_perm)
+
+        url = f"{self.url}?resource.tenant.org_id={self.tenant.org_id}"
+        response = self.client.get(url, **self.headers)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        names = {r["name"] for r in response.data["data"]}
+        self.assertIn("tenant_role", names)
 
     @patch(CACHE_PATCH_TARGET, _scope_cache())
     def test_list_roles_resource_id_unknown_workspace_returns_empty(self):
@@ -1165,7 +1224,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Blocked Role",
             "description": "Should be blocked",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
         response = self.client.post(self.url, data, format="json")
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -1179,7 +1238,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "API Test Role",
             "description": "Created via API",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.post(self.url, data, format="json")
@@ -1191,7 +1250,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         # Verify permissions are returned in response
         self.assertEqual(
             response.data["permissions"],
-            [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         )
 
         self._assert_audit_log(action=AuditLog.CREATE, description=f"Created V2 role: {data['name']}")
@@ -1224,8 +1283,8 @@ class RoleV2ViewSetTests(IdentityRequest):
             "name": "Multi Permission API Role",
             "description": "Has multiple permissions",
             "permissions": [
-                {"application": "inventory", "resource_type": "hosts", "operation": "read"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
             ],
         }
 
@@ -1237,21 +1296,21 @@ class RoleV2ViewSetTests(IdentityRequest):
         self.assertCountEqual(
             response.data["permissions"],
             [
-                {"application": "inventory", "resource_type": "hosts", "operation": "read"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
             ],
         )
 
     def test_create_role_preserves_permission_order(self):
         """Test that response permissions are returned in input order."""
-        # Request permissions in specific order (cost first, then inventory)
+        # Request permissions in specific order (reports first, then hosts)
         data = {
             "name": "Order Test Role",
             "description": "Testing permission order preservation",
             "permissions": [
-                {"application": "cost", "resource_type": "reports", "operation": "read"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "read"},
+                {"application": "testapp", "resource_type": "reports", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "read"},
             ],
         }
 
@@ -1263,9 +1322,9 @@ class RoleV2ViewSetTests(IdentityRequest):
         self.assertEqual(
             response.data["permissions"],
             [
-                {"application": "cost", "resource_type": "reports", "operation": "read"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "read"},
+                {"application": "testapp", "resource_type": "reports", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "read"},
             ],
         )
 
@@ -1273,7 +1332,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         """Test that missing name returns 400."""
         data = {
             "description": "No name",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.post(self.url, data, format="json")
@@ -1336,7 +1395,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Duplicate API Role",
             "description": "Second role",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.post(self.url, data, format="json")
@@ -1356,7 +1415,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "vulnerability viewer",
             "description": "Custom role with seeded name",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.post(self.url, data, format="json")
@@ -1380,7 +1439,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "PATCH VIEWER",
             "description": "Trying to rename to seeded name",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1441,7 +1500,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         """Test that creating a role without description returns 201 with empty description."""
         data = {
             "name": "No Description Role",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.post(self.url, data, format="json")
@@ -1456,7 +1515,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Response Format Role",
             "description": "Testing response format",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.post(self.url, data, format="json")
@@ -1473,7 +1532,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Fields Test Role",
             "description": "Testing fields parameter",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         url = f"{self.url}?fields=id,name,permissions_count"
@@ -1491,7 +1550,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Invalid Fields Role",
             "description": "Testing invalid fields",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         url = f"{self.url}?fields=id,nonexistent_field"
@@ -1508,7 +1567,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "role_*_admin",
             "description": "Should be rejected",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.post(self.url, data, format="json")
@@ -1522,6 +1581,8 @@ class RoleV2ViewSetTests(IdentityRequest):
     @override_settings(V2_MIGRATION_APP_EXCLUDE_LIST=["cost"])
     def test_create_role_rejects_migration_excluded_application(self):
         """Permissions in V2_MIGRATION_APP_EXCLUDE_LIST cannot be used on create."""
+        # Ensure the permission exists so it can be excluded by the setting
+        Permission.objects.get_or_create(permission="cost:reports:read", defaults={"tenant": self.tenant})
         v2_role_excluded_application_permission_ids_cache.invalidate()
         try:
             data = {
@@ -1554,7 +1615,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Updated Role",
             "description": "Updated description",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "write"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "write"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1567,7 +1628,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         # Verify permissions are updated in response
         self.assertEqual(
             response.data["permissions"],
-            [{"application": "inventory", "resource_type": "hosts", "operation": "write"}],
+            [{"application": "testapp", "resource_type": "hosts", "operation": "write"}],
         )
 
         self._assert_audit_log(
@@ -1611,8 +1672,8 @@ class RoleV2ViewSetTests(IdentityRequest):
             "name": "Test Role",
             "description": "Test description",
             "permissions": [
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
-                {"application": "cost", "resource_type": "reports", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "reports", "operation": "read"},
             ],
         }
 
@@ -1641,9 +1702,9 @@ class RoleV2ViewSetTests(IdentityRequest):
             "name": "Order Test Role",
             "description": "Testing permission order preservation",
             "permissions": [
-                {"application": "cost", "resource_type": "reports", "operation": "read"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "read"},
+                {"application": "testapp", "resource_type": "reports", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "read"},
             ],
         }
 
@@ -1655,9 +1716,9 @@ class RoleV2ViewSetTests(IdentityRequest):
         self.assertEqual(
             response.data["permissions"],
             [
-                {"application": "cost", "resource_type": "reports", "operation": "read"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "write"},
-                {"application": "inventory", "resource_type": "hosts", "operation": "read"},
+                {"application": "testapp", "resource_type": "reports", "operation": "read"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "write"},
+                {"application": "testapp", "resource_type": "hosts", "operation": "read"},
             ],
         )
 
@@ -1667,7 +1728,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Updated Role",
             "description": "Updated description",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1696,7 +1757,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Role One",
             "description": "Second role",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1747,7 +1808,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         update_url = reverse("v2_management:roles-detail", kwargs={"uuid": str(role.uuid)})
         data = {
             "name": "Test Role",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1773,7 +1834,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Updated Response Format Role",
             "description": "Updated description",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1798,7 +1859,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Updated Fields Test Role",
             "description": "Updated description",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(url, data, format="json")
@@ -1822,7 +1883,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Default Fields Role",
             "description": "Test description",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1845,7 +1906,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Updated*Role",
             "description": "Should be rejected",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1870,17 +1931,41 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Attempt to Update Platform Role",
             "description": "This should fail",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
 
-        # Platform roles are filtered out in get_queryset() for update action
+        # Platform roles are filtered out by assignable() so they're invisible (404)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(response["Content-Type"], "application/problem+json")
         self.assertEqual(response.data["status"], 404)
         self.assertIn("title", response.data)
         self.assertIn("detail", response.data)
+
+    def test_update_seeded_role_returns_400(self):
+        """Test that attempting to update a seeded role returns 400, not 404."""
+        public_tenant, _ = Tenant.objects.get_or_create(tenant_name="public")
+        seeded_role = SeededRoleV2.objects.create(
+            name="Seeded Role For Update Test",
+            description="A seeded role",
+            tenant=public_tenant,
+        )
+        seeded_role.permissions.add(self.permission1)
+
+        update_url = reverse("v2_management:roles-detail", kwargs={"uuid": str(seeded_role.uuid)})
+        data = {
+            "name": "Attempt to Update Seeded Role",
+            "description": "This should fail with 400",
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
+        }
+
+        response = self.client.put(update_url, data, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response["Content-Type"], "application/problem+json")
+        self.assertEqual(response.data["status"], 400)
+        self.assertIn("System roles may not be updated", str(response.data))
 
     # --- Problem RFC format on errors ---
 
@@ -1897,7 +1982,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         data = {
             "name": "Updated Role",
             "description": "Updated description",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         error_cases = [
@@ -1931,7 +2016,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         # We omit the description here, which should be treated as an empty string.
         data = {
             "name": "Description Role",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1952,7 +2037,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         # We omit the description here, which should be treated as an empty string.
         data = {
             "name": "A Better Role",
-            "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+            "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
         }
 
         response = self.client.put(update_url, data, format="json")
@@ -1979,7 +2064,7 @@ class RoleV2ViewSetTests(IdentityRequest):
             {
                 "name": f"Test Role {str(uuid.uuid4())}",
                 "description": "A role for testing",
-                "permissions": [{"application": "inventory", "resource_type": "hosts", "operation": "read"}],
+                "permissions": [{"application": "testapp", "resource_type": "hosts", "operation": "read"}],
             },
             format="json",
         )
@@ -2075,7 +2160,7 @@ class RoleV2ViewSetTests(IdentityRequest):
         self.assertTrue(RoleV2.objects.filter(pk=role.pk).exists())
 
     def test_delete_seeded(self):
-        """Test that deleting a seeded role fails with status 404."""
+        """Test that deleting a seeded role fails with status 400, not 404."""
         seed_roles()
 
         seeded_role = SeededRoleV2.objects.first()
@@ -2083,7 +2168,23 @@ class RoleV2ViewSetTests(IdentityRequest):
 
         response = self._request_delete({"ids": [str(seeded_role.uuid)]})
 
-        self._assert_delete_not_found(response, [seeded_role.uuid])
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("System roles may not be deleted", str(response.data))
+        self.assertTrue(RoleV2.objects.filter(pk=seeded_role.pk).exists())
+
+    def test_delete_mix_of_custom_and_seeded_returns_400(self):
+        """Test that bulk-deleting a mix of custom + seeded roles returns 400 and deletes nothing."""
+        seed_roles()
+        seeded_role = SeededRoleV2.objects.first()
+        self.assertIsNotNone(seeded_role)
+
+        custom_role = self._create_role()
+
+        response = self._request_delete({"ids": [custom_role["id"], str(seeded_role.uuid)]})
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("System roles may not be deleted", str(response.data))
+        self.assertTrue(RoleV2.objects.filter(uuid=custom_role["id"]).exists())
         self.assertTrue(RoleV2.objects.filter(pk=seeded_role.pk).exists())
 
     def test_delete_missing_ids(self):

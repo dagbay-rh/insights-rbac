@@ -18,12 +18,14 @@
 """MCP endpoint for RBAC using Anthropic MCP Python SDK for tool registration and schema generation."""
 
 import asyncio
+import atexit
 import concurrent.futures
 import hashlib
 import inspect
 import json
 import logging
 import re
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -31,6 +33,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache, wraps
 from typing import Any, Callable
 
+import jsonschema
 from django.conf import settings
 from django.core.cache import cache as django_cache
 from django.db.models import Count, Prefetch
@@ -42,7 +45,7 @@ from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from management.access.view import AccessView
 from management.audit_log.view import AuditLogViewSet
-from management.cache import _connection_pool
+from management.cache import _get_connection_pool, _is_mock_redis
 from management.group.view import GroupViewSet
 from management.models import Access, AuditLog, Group, Permission
 from management.permission.view import PermissionViewSet
@@ -57,6 +60,7 @@ from management.role.view import RoleViewSet
 from management.role_binding.model import RoleBinding, RoleBindingGroup, RoleBindingPrincipal
 from management.role_binding.view import RoleBindingViewSet
 from management.tenant_mapping.v2_activation import is_v2_write_activated
+from management.utils import is_valid_uuid
 from management.workspace.view import WorkspaceViewSet
 from mcp.server.fastmcp import FastMCP
 from prometheus_client import Counter, Histogram
@@ -151,12 +155,17 @@ _REDIS_DESC_PREFIX = "mcp:desc:"
 
 def _get_redis():
     """Get a Redis connection using the shared connection pool from management.cache."""
-    return Redis(connection_pool=_connection_pool, ssl=settings.REDIS_SSL)
+    if _is_mock_redis():
+        return None
+    return Redis(connection_pool=_get_connection_pool(), ssl=settings.REDIS_SSL)
 
 
 def _get_description_override(tool_name: str) -> str | None:
     try:
-        value = _get_redis().get(f"{_REDIS_DESC_PREFIX}{tool_name}")
+        conn = _get_redis()
+        if conn is None:
+            return None
+        value = conn.get(f"{_REDIS_DESC_PREFIX}{tool_name}")
         return value.decode() if value else None
     except redis_exceptions.RedisError:
         logger.debug("mcp: redis unavailable for description override, tool=%s", tool_name)
@@ -164,16 +173,22 @@ def _get_description_override(tool_name: str) -> str | None:
 
 
 def _set_description_override(tool_name: str, description: str) -> None:
-    _get_redis().set(f"{_REDIS_DESC_PREFIX}{tool_name}", description)
+    conn = _get_redis()
+    if conn is not None:
+        conn.set(f"{_REDIS_DESC_PREFIX}{tool_name}", description)
 
 
 def _delete_description_override(tool_name: str) -> None:
-    _get_redis().delete(f"{_REDIS_DESC_PREFIX}{tool_name}")
+    conn = _get_redis()
+    if conn is not None:
+        conn.delete(f"{_REDIS_DESC_PREFIX}{tool_name}")
 
 
 def _get_all_description_overrides() -> dict[str, str]:
     try:
         r = _get_redis()
+        if r is None:
+            return {}
         keys = r.keys(f"{_REDIS_DESC_PREFIX}*")
         if not keys:
             return {}
@@ -220,6 +235,7 @@ class ToolConfig:
     required_resource_type: str = "tenant"
     v1_permission: tuple[str, str] | None = None
     caveats: str = ""
+    redacted_fields: tuple[str, ...] = ()
 
 
 _TOOL_CONFIG: dict[str, ToolConfig] = {}
@@ -235,6 +251,7 @@ def register_tool(
     required_resource_type: str = "tenant",
     v1_permission: tuple[str, str] | None = None,
     caveats: str = "",
+    redacted_fields: tuple[str, ...] = (),
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Register a tool with both FastMCP and _TOOL_CONFIG.
 
@@ -265,6 +282,7 @@ def register_tool(
             required_resource_type=required_resource_type,
             v1_permission=v1_permission,
             caveats=resolved_caveats,
+            redacted_fields=redacted_fields,
         )
 
         if passes_request:
@@ -285,6 +303,9 @@ def register_tool(
         return fn
 
     return decorator
+
+
+_PRINCIPAL_REDACTED_FIELDS: tuple[str, ...] = ("email", "last_name")
 
 
 def _clone_request(
@@ -422,6 +443,30 @@ def _resolve_group_for_tool(request: HttpRequest, group_uuid: str, group_name: s
     return _resolve_group_uuid(group_uuid, group_name, tenant)
 
 
+_CROSS_ACCOUNT_LIFECYCLE = (
+    "Cross-account request lifecycle: "
+    "create → pending (awaits org admin approval) → approved (active access) → expired. "
+    "A request can also be denied or cancelled at any stage."
+)
+
+
+def _cross_account_status_counts(org_id: str) -> dict[str, int]:
+    """Return pending and expired cross-account request counts in a single query."""
+    rows = (
+        CrossAccountRequest.objects.filter(target_org=org_id, status__in=["pending", "expired"])
+        .values("status")
+        .annotate(count=Count("pk"))
+    )
+    counts = {r["status"]: r["count"] for r in rows}
+    return {"pending": counts.get("pending", 0), "expired": counts.get("expired", 0)}
+
+
+def _format_candidate_name(user: dict) -> str:
+    """Build a display name from BOP user data, falling back to username."""
+    name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+    return name or user.get("username", "")
+
+
 def _lookup_principal(
     request: HttpRequest, username_or_name: str, tenant
 ) -> tuple[Principal | None, str | None, list[dict] | None]:
@@ -457,7 +502,7 @@ def _lookup_principal(
         candidates = [
             {
                 "username": u.get("username"),
-                "name": f"{u.get('first_name', '')} {u.get('last_name', '')}".strip(),
+                "name": _format_candidate_name(u),
             }
             for u in matches
         ]
@@ -496,14 +541,17 @@ def hello(message: str = "Hello, World!") -> str:
         "list_principals(name='John Smith'). "
         "To confirm a user exists and check their org admin status, call "
         "list_principals(usernames='<user>', match_criteria='exact'). "
-        "Returns: {meta: {count}, links, data: [{username, email, first_name, last_name, is_org_admin, ...}]}. "
+        "Returns: {meta: {count}, links, data: [{uuid, username, first_name, is_org_admin, ...}]}. "
+        "Sensitive fields (email, last_name) are redacted by default. "
         "Calls: GET /api/v1/principals/\n"
         "Caveats:\n"
         "- Shows only users provisioned in this org -- does not include cross-account (TAM) users or "
         "service accounts from other identity providers.\n"
-        "- 'is_org_admin' reflects the current state from the identity provider, not a historical snapshot."
+        "- 'is_org_admin' reflects the current state from the identity provider, not a historical snapshot.\n"
+        "- Sensitive fields (email, last_name) are redacted from responses."
     ),
     requires_auth=True,
+    redacted_fields=_PRINCIPAL_REDACTED_FIELDS,
 )
 def list_principals(
     request: HttpRequest,
@@ -557,7 +605,7 @@ def list_principals(
         except (json.JSONDecodeError, AttributeError):
             pass
 
-    return result
+    return _strip_pii_from_principal_list(result, tenant=getattr(request, "tenant", None))
 
 
 def _list_principals_by_name(
@@ -620,7 +668,7 @@ def _list_principals_by_name(
 
     base_params = f"name={name_filter}&sort_order={sort_order}&status={status}&username_only={username_only}"
 
-    return json.dumps(
+    raw_json = json.dumps(
         {
             "meta": {"count": len(filtered_users), "limit": limit, "offset": offset},
             "links": {
@@ -639,6 +687,35 @@ def _list_principals_by_name(
         },
         default=str,
     )
+    return _strip_pii_from_principal_list(raw_json, tenant=getattr(request, "tenant", None))
+
+
+def _strip_pii_from_principal_list(raw_json: str, tenant: Any = None, redacted_fields: tuple[str, ...] = ()) -> str:
+    """Strip redacted fields from a principal-list API response, enriching with UUIDs."""
+    fields = redacted_fields or _PRINCIPAL_REDACTED_FIELDS
+    if not _is_pii_redaction_enabled():
+        return raw_json
+    try:
+        parsed = json.loads(raw_json)
+    except (json.JSONDecodeError, TypeError):
+        return raw_json
+
+    data = parsed.get("data", [])
+    if tenant and data:
+        usernames = [item.get("username") for item in data if item.get("username")]
+        if usernames:
+            uuid_map = dict(
+                Principal.objects.filter(username__in=usernames, tenant=tenant).values_list("username", "uuid")
+            )
+            for item in data:
+                uname = item.get("username")
+                if uname and uname in uuid_map:
+                    item["uuid"] = str(uuid_map[uname])
+
+    for item in data:
+        for field in fields:
+            item.pop(field, None)
+    return json.dumps(parsed, default=str)
 
 
 def _call_view(
@@ -734,6 +811,75 @@ def get_status(request: HttpRequest) -> str:
     """Return server status by delegating to the status view."""
     path = reverse("v1_api:server-status")
     return _call_view(request, _status_view, path, {})
+
+
+@register_tool(
+    description=(
+        "Check MCP server health: tool registry integrity, database connectivity, "
+        "and Redis availability. No authentication required — designed for "
+        "infrastructure probing and readiness checks. "
+        "Returns status 'ok' when all checks pass, 'degraded' with per-check "
+        "details when any check fails."
+    ),
+    requires_auth=False,
+    api_version=ApiVersion.UNVERSIONED,
+)
+def health_check() -> str:
+    """Verify MCP-specific health: tool registry, database, and Redis."""
+    checks: dict[str, str] = {}
+    details: dict[str, str] = {}
+
+    # 1. Tool registry check
+    try:
+        config_count = len(_TOOL_CONFIG)
+        tools = _get_tools()
+        tools_count = len(tools)
+        if config_count > 0 and tools_count > 0:
+            checks["tools"] = "ok"
+        else:
+            checks["tools"] = "error"
+            details["tools"] = "registry empty"
+    except Exception:
+        logger.exception("mcp: health_check tools registry probe failed")
+        checks["tools"] = "error"
+        details["tools"] = "unavailable"
+
+    # 2. Database check
+    try:
+        _check_database()
+        checks["database"] = "ok"
+    except Exception:
+        logger.exception("mcp: health_check database probe failed")
+        checks["database"] = "error"
+        details["database"] = "unavailable"
+
+    # 3. Redis check
+    try:
+        _check_redis()
+        checks["redis"] = "ok"
+    except Exception:
+        logger.exception("mcp: health_check redis probe failed")
+        checks["redis"] = "error"
+        details["redis"] = "unavailable"
+
+    overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
+    result: dict[str, Any] = {"status": overall, "checks": checks}
+    if details:
+        result["details"] = details
+    return json.dumps(result)
+
+
+def _check_database() -> None:
+    """Probe database connectivity via a lightweight ORM query."""
+    Tenant.objects.exists()
+
+
+def _check_redis() -> None:
+    """Probe Redis connectivity via PING. No-op when Redis is mocked."""
+    conn = _get_redis()
+    if conn is None:
+        return
+    conn.ping()
 
 
 @register_tool(
@@ -1761,10 +1907,12 @@ def get_group(
     description=(
         "List principals (users) that are members of a specific group. "
         "Optionally filter by principal_type. "
-        "Returns: {meta: {count}, links, data: [{username, email, first_name, last_name, ...}]}. "
+        "Returns: {meta: {count}, links, data: [{uuid, username, first_name, ...}]}. "
+        "Sensitive fields (email, last_name) are redacted by default. "
         "Calls: GET /api/v1/groups/{uuid}/principals/"
     ),
     requires_auth=True,
+    redacted_fields=_PRINCIPAL_REDACTED_FIELDS,
 )
 def list_group_principals(
     request: HttpRequest,
@@ -1783,7 +1931,8 @@ def list_group_principals(
         query_params["principal_type"] = principal_type
 
     path = reverse("v1_management:group-principals", kwargs={"uuid": group_uuid})
-    return _call_view(request, _group_principals_view, path, query_params, uuid=group_uuid)
+    result = _call_view(request, _group_principals_view, path, query_params, uuid=group_uuid)
+    return _strip_pii_from_principal_list(result, tenant=getattr(request, "tenant", None))
 
 
 @register_tool(
@@ -1797,7 +1946,7 @@ def list_group_principals(
         "list_cross_account_requests(query_by='target_org', status='approved'). "
         "Order by: 'request_id', 'start_date', 'end_date', 'created', 'modified', "
         "'status' (prefix with '-' to reverse). "
-        "Returns: {meta: {count}, links, data: [{request_id, target_account, status, start_date, end_date, ...}]}. "
+        "Returns: {meta: {count}, links, data: [{request_id, target_org, status, start_date, end_date, ...}]}. "
         "Calls: GET /api/v1/cross-account-requests/\n"
         "Caveats:\n"
         "- Cross-account requests are org-to-org, not user-to-user. A TAM requests access to your "
@@ -1843,8 +1992,8 @@ def list_cross_account_requests(
 @register_tool(
     description=(
         "Get details of a specific cross-account access request by its ID, including "
-        "status, start/end dates, target account, and the requested roles. "
-        "Returns: {request_id, target_account, status, start_date, end_date, created, roles, ...}. "
+        "status, start/end dates, target org, and the requested roles. "
+        "Returns: {request_id, target_org, status, start_date, end_date, created, roles, ...}. "
         "Calls: GET /api/v1/cross-account-requests/{request_id}/"
     ),
     requires_auth=True,
@@ -1869,8 +2018,14 @@ def get_cross_account_request(
         "investigate_tam_access(requester_name='Rachel') to see what roles/permissions she has. "
         "Set 'required_permission' to check if a specific permission is granted (e.g., "
         "'subscriptions:watch:read'). The tool will report whether that permission is present. "
-        "Returns: {requests: [{request_id, status, end_date, days_remaining, requester_info, "
+        "When no approved requests are found, the tool proactively checks for pending/expired "
+        "requests and explains the cross-account request lifecycle. "
+        "RESPONSE FORMAT: Present results as a table: "
+        "requester name | roles granted | specific permissions | expiration | status. "
+        "Explain the lifecycle: create → pending → approved → active → expired. "
+        "Returns: {requests: [{request_id, status, end_date, days_remaining, requester_info: {user_id}, "
         "roles: [{name, permissions: [...]}], permission_summary}], analysis}. "
+        "Sensitive requester fields (email, last_name) are redacted; requesters are identified by user_id. "
         "AFTER ANALYSIS: Present numbered options: "
         "(1) update the cross-account request with an expanded roles list, "
         "(2) deny the current request and ask the TAM to resubmit with the correct scope (cleaner audit trail). "
@@ -1880,6 +2035,7 @@ def get_cross_account_request(
     api_version=ApiVersion.COMMON,
     required_relation="rbac_roles_read",
     v1_permission=("role", "read"),
+    redacted_fields=_PRINCIPAL_REDACTED_FIELDS,
 )
 def investigate_tam_access(
     request: HttpRequest,
@@ -1913,14 +2069,31 @@ def investigate_tam_access(
     requests_list = list(queryset)
 
     if not requests_list:
+        status_counts = _cross_account_status_counts(org_id)
+        pending_count = status_counts["pending"]
+        expired_count = status_counts["expired"]
+
+        hint: str
+        if pending_count or expired_count:
+            hint = (
+                f"There are {pending_count} pending and {expired_count} expired request(s). "
+                "Use investigate_tam_access(status='pending') or status='expired' to inspect them."
+            )
+        else:
+            hint = "No requests of any status exist for this organization."
+
         return json.dumps(
             {
                 "requests": [],
                 "analysis": {
                     "total_active_requests": 0,
                     "message": f"No {status} cross-account requests found for this organization.",
-                    "hint": "Use list_cross_account_requests(query_by='target_org', status='pending') "
-                    "to check for pending requests, or status='expired' for expired ones.",
+                    "other_statuses": {
+                        "pending": pending_count,
+                        "expired": expired_count,
+                    },
+                    "lifecycle": _CROSS_ACCOUNT_LIFECYCLE,
+                    "hint": hint,
                 },
             }
         )
@@ -1940,11 +2113,12 @@ def investigate_tam_access(
                     "last_name": principal.get("last_name", ""),
                     "email": principal.get("email", ""),
                     "username": principal.get("username", ""),
+                    "user_id": str(principal.get("user_id", "")),
                 }
     except Exception:
         logger.warning("mcp: failed to fetch requester info from BOP", exc_info=True)
 
-    # Filter by requester name/email if provided
+    # Filter by requester name/email if provided (uses BOP data internally, not exposed)
     filtered_requests = requests_list
     if requester_name or requester_email:
         filtered_requests = []
@@ -1968,7 +2142,9 @@ def investigate_tam_access(
                     "filtered_count": 0,
                     "message": f"No cross-account requests found matching name='{requester_name}' "
                     f"or email='{requester_email}'.",
-                    "hint": "Call investigate_tam_access() without filters to see all active requests.",
+                    "lifecycle": _CROSS_ACCOUNT_LIFECYCLE,
+                    "hint": "Call investigate_tam_access() without filters to see all active requests, "
+                    "or try investigate_tam_access(status='pending') for pending requests.",
                 },
             }
         )
@@ -1981,7 +2157,11 @@ def investigate_tam_access(
 
     for car in filtered_requests:
         days_remaining = (car.end_date - now).days if car.end_date else None
-        requester_info = user_info_map.get(car.user_id, {"user_id": car.user_id})
+        raw_info = user_info_map.get(car.user_id, {})
+        if _is_pii_redaction_enabled():
+            requester_info = {"user_id": raw_info.get("user_id", car.user_id)}
+        else:
+            requester_info = raw_info if raw_info else {"user_id": car.user_id}
 
         roles_data: list[dict[str, Any]] = []
         for role in car.roles.all():
@@ -2078,9 +2258,14 @@ def investigate_tam_access(
         "a summary of all active approved cross-account requests with audit activity. "
         "Set include_inactive=true to also see expired or pending requests. "
         "Set audit_days to control how far back to look in audit logs (default 30 days). "
-        "Returns: {active_access: [{user_info, roles, permissions, expires, days_remaining, "
+        "FORMAT FOR CISO BRIEFING: Present as a table with columns: "
+        "Red Hat user | roles | access scope | expiration | approved by | recent activity. "
+        "When no active access exists, still present a summary stating zero access, "
+        "note any pending/expired requests, and provide a monitoring recommendation. "
+        "Returns: {active_access: [{user_info: {user_id}, roles, permissions, expires, days_remaining, "
         "audit_activity: {total_actions, recent_actions, summary}}], summary: {total_users, "
         "expiring_soon, unused_access}}. "
+        "Sensitive user fields (email, last_name) are redacted; users are identified by user_id. "
         "AFTER ANALYSIS: Present numbered options: "
         "(1) cancel unused cross-account access (requests with no audit log activity), "
         "(2) format the full report for a CISO briefing, "
@@ -2091,6 +2276,7 @@ def investigate_tam_access(
     api_version=ApiVersion.COMMON,
     required_relation="rbac_roles_read",
     v1_permission=("role", "read"),
+    redacted_fields=_PRINCIPAL_REDACTED_FIELDS,
 )
 def audit_redhat_access(
     request: HttpRequest,
@@ -2122,6 +2308,19 @@ def audit_redhat_access(
     requests_list = list(queryset)
 
     if not requests_list:
+        status_counts = _cross_account_status_counts(org_id)
+        pending_count = status_counts["pending"]
+        expired_count = status_counts["expired"]
+
+        ciso_parts = [
+            "CISO Summary: Zero Red Hat personnel currently have active access to this "
+            "organization's console.redhat.com environment."
+        ]
+        if pending_count:
+            ciso_parts.append(f"There are {pending_count} pending request(s) awaiting approval.")
+        if expired_count:
+            ciso_parts.append(f"There are {expired_count} previously expired access grant(s) on record.")
+
         return json.dumps(
             {
                 "active_access": [],
@@ -2129,8 +2328,20 @@ def audit_redhat_access(
                     "total_users": 0,
                     "expiring_soon": 0,
                     "unused_access": 0,
-                    "message": "No cross-account requests found for this organization.",
-                    "hint": "Use list_cross_account_requests(query_by='target_org') to see all requests.",
+                    "pending_requests": pending_count,
+                    "expired_requests": expired_count,
+                    "message": "No active Red Hat cross-account access found for this organization.",
+                    "ciso_briefing": " ".join(ciso_parts),
+                    "briefing_template": (
+                        "If active access existed, the report would include for each Red Hat user: "
+                        "name, email, roles granted, permission scope, access start/end dates, "
+                        "days remaining, and RBAC audit activity (actions performed during the access window)."
+                    ),
+                    "monitoring": (
+                        "To monitor future cross-account requests, periodically call "
+                        "audit_redhat_access() or list_cross_account_requests(query_by='target_org', "
+                        "status='pending') to catch new requests before they are approved."
+                    ),
                 },
             }
         )
@@ -2150,11 +2361,12 @@ def audit_redhat_access(
                     "last_name": principal.get("last_name", ""),
                     "email": principal.get("email", ""),
                     "username": principal.get("username", ""),
+                    "user_id": str(principal.get("user_id", "")),
                 }
     except Exception:
         logger.warning("mcp: failed to fetch requester info from BOP", exc_info=True)
 
-    # Batch query audit logs for all usernames
+    # Batch query audit logs for all usernames (uses username internally for audit log lookup)
     all_usernames = {info.get("username") for info in user_info_map.values() if info.get("username")}
     audit_by_user: dict[str, list[AuditLog]] = {u: [] for u in all_usernames}
     audit_counts_by_user: dict[str, int] = {}
@@ -2246,13 +2458,19 @@ def audit_redhat_access(
         results.append(
             {
                 "request_id": str(car.request_id),
-                "user_info": {
-                    "user_id": requester_info.get("user_id", car.user_id),
-                    "name": f"{requester_info.get('first_name', '')} {requester_info.get('last_name', '')}".strip()
-                    or car.user_id,
-                    "email": requester_info.get("email", ""),
-                    "username": username or f"user_{car.user_id}",
-                },
+                "user_info": (
+                    {"user_id": requester_info.get("user_id", car.user_id)}
+                    if _is_pii_redaction_enabled()
+                    else {
+                        "user_id": requester_info.get("user_id", car.user_id),
+                        "name": (
+                            f"{requester_info.get('first_name', '')} {requester_info.get('last_name', '')}".strip()
+                            or car.user_id
+                        ),
+                        "email": requester_info.get("email", ""),
+                        "username": username or f"user_{car.user_id}",
+                    }
+                ),
                 "status": status_display,
                 "start_date": car.start_date.strftime("%Y-%m-%d") if car.start_date else None,
                 "end_date": car.end_date.strftime("%Y-%m-%d") if car.end_date else None,
@@ -2296,8 +2514,9 @@ def audit_redhat_access(
         "roles/permissions they'd lose, and identifies who would be left stranded (losing all "
         "non-default access). Essential for org changes, contractor offboarding, or acquisitions. "
         "Provide either group_uuid OR group_name to identify the group. "
-        "Returns: {group: {...}, members: [{username, type, other_groups, access_impact}], "
+        "Returns: {group: {...}, members: [{uuid, type, other_groups, access_impact}], "
         "roles: [{name, permissions}], analysis: {stranded_users, stranded_service_accounts, ...}}. "
+        "Members are identified by UUID. Sensitive fields (email, last_name) are redacted. "
         "STRANDED means the member is ONLY in this group plus platform_default — they'd be demoted "
         "to default access only. Service accounts with no other groups would start 403'ing. "
         "Queries: Group, Principal, Policy, Role, Access models directly (no per-member API calls). "
@@ -2311,6 +2530,7 @@ def audit_redhat_access(
     api_version=ApiVersion.COMMON,
     required_relation="rbac_roles_read",
     v1_permission=("group", "read"),
+    redacted_fields=_PRINCIPAL_REDACTED_FIELDS,
 )
 def audit_group_for_dissolution(
     request: HttpRequest,
@@ -2447,8 +2667,8 @@ def audit_group_for_dissolution(
         else:
             access_impact = "no impact - all permissions retained via other groups"
 
+        redact = _is_pii_redaction_enabled()
         member_info: dict[str, Any] = {
-            "username": principal.username,
             "uuid": str(principal.uuid),
             "type": principal.type,
             "other_groups": other_groups_info,
@@ -2460,19 +2680,22 @@ def audit_group_for_dissolution(
             "permissions_retained": len(retained_permissions),
         }
 
+        if not redact:
+            member_info["username"] = principal.username
         if principal.type == Principal.Types.SERVICE_ACCOUNT:
             member_info["service_account_id"] = principal.service_account_id
 
         members_data.append(member_info)
 
-        # Track stranded members
+        # Track stranded members by UUID (or username when redaction is off)
+        member_id = str(principal.uuid) if redact else principal.username
         if is_stranded:
             if principal.type == Principal.Types.USER:
-                stranded_users.append(principal.username)
+                stranded_users.append(member_id)
             else:
-                stranded_service_accounts.append(principal.username)
+                stranded_service_accounts.append(member_id)
         elif lost_permissions and retained_permissions:
-            members_with_overlap.append(principal.username)
+            members_with_overlap.append(member_id)
 
     # Group permissions by application for summary
     perm_by_app: dict[str, int] = {}
@@ -2940,6 +3163,11 @@ def _check_user_permission_v1(request: HttpRequest, username: str, permission: s
     )
 
 
+_DEFAULT_INCLUDE_GROUP_ROLES = True
+_DEFAULT_INCLUDE_PERMISSIONS = True
+_DEFAULT_AUDIT_LOG_LIMIT = 10
+
+
 @register_tool(
     description=(
         "Get comprehensive state for a specific user, returning all RBAC information in one call. "
@@ -2950,11 +3178,22 @@ def _check_user_permission_v1(request: HttpRequest, username: str, permission: s
         "(4) actions performed BY the user with breakdown by group and action type. "
         "Supports both V1 and V2 organizations automatically. "
         "Use this instead of calling list_groups + list_access + list_audit_logs separately. "
+        "SCENARIO: 'Contractor X is being offboarded, I need their RBAC activity and current access' → "
+        "call get_user_state(username='X') to get groups, permissions, and audit trail in one call. "
+        "USE WHEN: 'offboard', 'offboarding', 'leaving the company', 'contractor leaving', "
+        "'deprovisioning', 'compliance report', 'activity summary for records', 'what access does user have'. "
         "RESPONSE FORMAT: Summarize as 'Member of: <groups>. Effective access: <role names>. "
         "Audit log: <N> actions performed by user on <groups> (action types).'. "
-        "Returns: {username, org_version, groups: [{name, roles, recent_activity}], "
+        "AFTER ANALYSIS: Present numbered options: "
+        "(1) remove the user from all their group(s), "
+        "(2) generate a formatted compliance report for records, "
+        "(3) both. "
+        "Format as 'Reply 1, 2, or 3 -- or no'. "
+        "Note: Deactivating the user account itself is handled in the IT/account portal, not the RBAC API. "
+        "Returns: {uuid, org_version, groups: [{name, roles, recent_activity}], "
         "access: [{permission, role_name, ...}], user_actions: {total_count, by_group, by_type, recent}, "
-        "summary: {group_count, permission_count, actions_by_user, recent_actions_on_groups}}.\n"
+        "summary: {group_count, permission_count, actions_by_user, recent_actions_on_groups}}. "
+        "The user is identified by UUID in the response (email, last_name redacted).\n"
         "Caveats:\n"
         "- Org admins have implicit full access that bypasses all RBAC checks; "
         "this is not reflected in the returned data.\n"
@@ -2965,14 +3204,15 @@ def _check_user_permission_v1(request: HttpRequest, username: str, permission: s
     api_version=ApiVersion.UNIFIED,
     required_relation="rbac_roles_read",
     v1_permission=("principal", "read"),
+    redacted_fields=_PRINCIPAL_REDACTED_FIELDS,
 )
 def get_user_state(
     request: HttpRequest,
     *,
     username: str,
-    include_group_roles: bool = True,
-    include_permissions: bool = True,
-    audit_log_limit: int = 10,
+    include_group_roles: bool = _DEFAULT_INCLUDE_GROUP_ROLES,
+    include_permissions: bool = _DEFAULT_INCLUDE_PERMISSIONS,
+    audit_log_limit: int = _DEFAULT_AUDIT_LOG_LIMIT,
 ) -> str:
     """Get comprehensive RBAC state for a user including groups, access, and audit activity."""
     # Clamp audit_log_limit to prevent expensive queries
@@ -3006,7 +3246,7 @@ def get_user_state(
     username = resolved_username
 
     result: dict[str, Any] = {
-        "username": username,
+        **({"uuid": str(principal.uuid)} if _is_pii_redaction_enabled() else {"username": username}),
         "org_version": org_version,
         "groups": [],
         "access": [],
@@ -3149,16 +3389,45 @@ def get_user_state(
     result["summary"]["recent_actions_on_groups"] = total_activity
     result["summary"]["actions_by_user"] = len(user_performed_actions)
 
-    # Add hints for deeper investigation
     result["hints"] = {
         "check_specific_permission": (
-            f"Use check_user_permission(username='{username}', permission='app:resource:verb') to verify"
+            "Use check_user_permission(username=..., permission='app:resource:verb') to verify"
         ),
         "view_audit_details": "Use list_audit_logs(group_name='<group>', include_authorization=True) for details",
         "trace_role_permissions": "Use get_role(role_uuid='<uuid>') to see all permissions granted by a role",
     }
 
     return json.dumps(result, default=str)
+
+
+@register_tool(
+    description=(
+        "Look up a contractor, vendor, consultant, temp, intern, or any non-employee by name. "
+        "Returns their full RBAC state: group memberships, roles, permissions, and audit trail. "
+        "Use for offboarding, compliance reviews, access audits, or deprovisioning. "
+        "This is the same as get_user_state -- all employment types are regular RBAC users."
+    ),
+    requires_auth=True,
+    api_version=ApiVersion.UNIFIED,
+    required_relation="rbac_roles_read",
+    v1_permission=("principal", "read"),
+)
+def lookup_person(
+    request: HttpRequest,
+    *,
+    username: str,
+    include_group_roles: bool = _DEFAULT_INCLUDE_GROUP_ROLES,
+    include_permissions: bool = _DEFAULT_INCLUDE_PERMISSIONS,
+    audit_log_limit: int = _DEFAULT_AUDIT_LOG_LIMIT,
+) -> str:
+    """Alias for get_user_state that surfaces contractor/vendor/consultant terminology."""
+    return get_user_state(
+        request,
+        username=username,
+        include_group_roles=include_group_roles,
+        include_permissions=include_permissions,
+        audit_log_limit=audit_log_limit,
+    )
 
 
 def _get_user_access_v1(request: HttpRequest, username: str) -> list[dict[str, Any]]:
@@ -4336,9 +4605,9 @@ def create_workspace(
     description=(
         "Create a cross-account access request. Allows users from one org (e.g. TAMs) "
         "to request temporary access to another org's resources. "
-        "Required: target_account (the account number to request access to), "
+        "Required: target_org (the org ID to request access to), "
         "start_date (YYYY-MM-DD), end_date (YYYY-MM-DD), roles (list of role UUIDs). "
-        "Example: create_cross_account_request(target_account='12345', "
+        "Example: create_cross_account_request(target_org='12345', "
         "start_date='2026-06-01', end_date='2026-06-30', roles=['<role-uuid>']) "
         "Returns: the created request with request_id, status, dates. "
         "Calls: POST /api/v1/cross-account-requests/"
@@ -4349,14 +4618,14 @@ def create_workspace(
 def create_cross_account_request(
     request: HttpRequest,
     *,
-    target_account: str,
+    target_org: str,
     start_date: str,
     end_date: str,
     roles: list[str],
 ) -> str:
     """Create a cross-account request by delegating to CrossAccountRequestViewSet."""
     body: dict[str, Any] = {
-        "target_account": target_account,
+        "target_org": target_org,
         "start_date": start_date,
         "end_date": end_date,
         "roles": roles,
@@ -4369,7 +4638,9 @@ def create_cross_account_request(
 @register_tool(
     description=(
         "Check if a user can be delegated user access management without Org Admin privileges. "
-        "\n\n"
+        "Accepts username (e.g., 'doejoe') or display name (e.g., 'Joe Doe'). "
+        "If a display name is given, the tool resolves it automatically. "
+        "If multiple users match, candidates are returned for disambiguation.\n\n"
         "USE WHEN: 'delegate user access', 'let someone manage users without Org Admin', "
         "'give RBAC permissions', 'User Access administrator role'.\n\n"
         "BACKGROUND: 'User Access administrator' is a system role with rbac:* permissions. "
@@ -4414,29 +4685,59 @@ def guide_user_access_delegation(
         }
 
         # Check if user exists (reuse shared lookup helper)
+        original_input = username
         try:
             _principal, resolved_username, candidates = _lookup_principal(request, username, tenant)
             if candidates:
                 result["user_info"] = {
-                    "error": f"Multiple users match '{username}'. Please specify the exact username.",
+                    "error": f"Multiple users match '{original_input}'. Please specify the exact username.",
                     "candidates": candidates,
+                    "hint": "Re-call with the exact username from the candidates list.",
                 }
             elif resolved_username:
                 username = resolved_username
+                user_info: dict = {"username": username}
+                if resolved_username != original_input:
+                    user_info["resolved_from"] = f"Display name '{original_input}' matched to '{resolved_username}'"
                 # Fetch user details (org admin status, active status) via BOP
                 principals_raw = list_principals(request, usernames=username, match_criteria="exact", limit=1)
                 principals_data = json.loads(principals_raw)
                 if principals_data.get("data"):
                     user_data = principals_data["data"][0]
+                    user_info["is_org_admin"] = user_data.get("is_org_admin", False)
+                    user_info["is_active"] = user_data.get("is_active", True)
+                result["user_info"] = user_info
+            else:
+                # Fuzzy fallback: try display name search
+                original_input = username
+                name_raw = _list_principals_by_name(
+                    request, username, limit=5, offset=0, sort_order="asc", status="enabled"
+                )
+                name_data = json.loads(name_raw)
+                candidates = name_data.get("data", [])
+                if len(candidates) == 1:
+                    user_data = candidates[0]
+                    username = user_data.get("username", username)
                     result["user_info"] = {
                         "username": username,
                         "is_org_admin": user_data.get("is_org_admin", False),
                         "is_active": user_data.get("is_active", True),
+                        "resolved_from": f"Display name '{original_input}' matched to '{username}'",
+                    }
+                elif len(candidates) > 1:
+                    result["user_info"] = {
+                        "error": f"Multiple users match '{original_input}'",
+                        "candidates": [
+                            {
+                                "username": c.get("username"),
+                                "name": _format_candidate_name(c),
+                            }
+                            for c in candidates
+                        ],
+                        "hint": "Re-call with the exact username from the candidates list.",
                     }
                 else:
-                    result["user_info"] = {"username": username}
-            else:
-                result["user_info"] = {"error": f"User '{username}' not found"}
+                    result["user_info"] = {"error": f"User '{original_input}' not found"}
         except Exception as e:
             logger.warning("guide_user_access_delegation: Failed to verify user %s: %s", username, e)
             result["user_info"] = {"error": f"Could not verify user '{username}'"}
@@ -5112,6 +5413,9 @@ class MCPView(View):
 
     def post(self, request: HttpRequest) -> HttpResponse:
         """Handle MCP JSON-RPC requests via HTTP POST."""
+        if _shutdown_in_progress.is_set():
+            return _error_response(None, -32000, "Server is shutting down")
+
         org_id = getattr(getattr(request, "user", None), "org_id", None)
         req_id = getattr(request, "req_id", "unknown")
 
@@ -5280,6 +5584,277 @@ def _get_tools() -> list[Any]:
     return asyncio.run(mcp.list_tools())
 
 
+@lru_cache(maxsize=1)
+def _get_tool_schemas() -> dict[str, dict[str, Any]]:
+    """Build a {tool_name: inputSchema} lookup from the cached tool list."""
+    return {tool.name: tool.inputSchema for tool in _get_tools()}
+
+
+def _sanitize_validation_error(error: jsonschema.ValidationError) -> str:
+    """Build a human-readable validation message without exposing internals."""
+    path = ".".join(str(p) for p in error.absolute_path) if error.absolute_path else ""
+    if error.validator == "type":
+        expected = error.schema.get("type", "unknown")
+        actual = type(error.instance).__name__
+        field = f"'{path}'" if path else "input"
+        return f"Expected {field} to be {expected}, got {actual}"
+    if error.validator == "required":
+        if isinstance(error.instance, dict) and error.validator_value:
+            missing = [p for p in error.validator_value if p not in error.instance]
+            if missing:
+                return f"Missing required argument: {missing[0]}"
+        match = re.match(r"'(.+)' is a required property", error.message)
+        field_name = match.group(1) if match else error.message
+        return f"Missing required argument: {field_name}"
+    if error.validator == "additionalProperties":
+        names = re.findall(r"'([^']+)'", error.message)
+        if names:
+            if len(names) == 1:
+                return f"Unknown argument: {names[0]}"
+            return f"Unknown arguments: {', '.join(names)}"
+        return "Unknown argument provided"
+    if path:
+        return f"Validation failed for '{path}': {error.message}"
+    return f"Validation failed: {error.message}"
+
+
+def _validate_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> str | None:
+    """Validate arguments against the tool's JSON schema.
+
+    Injects ``additionalProperties: false`` so unknown arguments are
+    rejected even though FastMCP-generated schemas omit that keyword.
+
+    Returns None on success, or a sanitized error message on failure.
+    """
+    try:
+        schemas = _get_tool_schemas()
+    except Exception:
+        return None
+    schema = schemas.get(tool_name)
+    if schema is None:
+        return None
+    strict_schema = dict(schema)
+    strict_schema.setdefault("additionalProperties", False)
+    try:
+        jsonschema.validate(instance=arguments, schema=strict_schema)
+    except jsonschema.ValidationError as exc:
+        return _sanitize_validation_error(exc)
+    return None
+
+
+# --- Semantic write payload validation ---
+
+_MAX_PERMISSIONS_PER_ROLE = 100
+
+
+def _validate_permission_format(permission: str) -> str | None:
+    """Validate a V1 permission string matches 'application:resource_type:verb' format."""
+    parts = permission.split(":")
+    if len(parts) != 3:
+        return (
+            f"Permission '{permission}' is malformed. "
+            "Expected format 'application:resource_type:verb' (e.g. 'cost-management:cost_model:read')."
+        )
+    for i, label in enumerate(("application", "resource_type", "verb")):
+        part = parts[i]
+        if not part or part != part.strip():
+            return (
+                f"Permission '{permission}' has an empty or whitespace-padded {label}. "
+                "Each segment must be a non-empty string with no leading/trailing spaces."
+            )
+    return None
+
+
+def _validate_v2_permission(perm: dict[str, Any], index: int) -> str | None:
+    """Validate a V2 permission dict has non-empty application, resource_type, and operation."""
+    required_keys = ("application", "resource_type", "operation")
+    for key in required_keys:
+        value = perm.get(key)
+        if not value or not isinstance(value, str) or not value.strip():
+            return (
+                f"permissions[{index}] is missing or has empty '{key}'. "
+                f"Each permission needs: {', '.join(required_keys)}."
+            )
+    return None
+
+
+def _validate_uuid_field(value: str, field_name: str) -> str | None:
+    """Validate that a string is a valid UUID format."""
+    if not value:
+        return None
+    if not is_valid_uuid(value):
+        return f"'{field_name}' value '{value}' is not a valid UUID."
+    return None
+
+
+def _validate_uuid_list(values: list | None, field_prefix: str) -> str | None:
+    """Validate each item in a list is a valid UUID, returning the first error found."""
+    for i, value in enumerate(values or []):
+        error = _validate_uuid_field(value, f"{field_prefix}[{i}]")
+        if error:
+            return error
+    return None
+
+
+def _validate_v1_perm_entry(entry: Any, index: int) -> str | None:
+    """Validate a single V1 access entry (dict with 'permission' key in correct format)."""
+    perm = entry.get("permission", "") if isinstance(entry, dict) else ""
+    error = _validate_permission_format(perm)
+    return f"access[{index}]: {error}" if error else None
+
+
+def _validate_v2_perm_entry(perm: Any, index: int) -> str | None:
+    """Validate a single V2 permission dict."""
+    if not isinstance(perm, dict):
+        return f"permissions[{index}] must be an object with application, resource_type, operation."
+    return _validate_v2_permission(perm, index)
+
+
+def _validate_role_permissions(
+    arguments: dict[str, Any],
+    *,
+    is_update: bool,
+    role_id_field: str,
+    perms_field: str,
+    per_perm_validator: Callable[[Any, int], str | None],
+) -> str | None:
+    """Validate role arguments: optional UUID on update, permission count limit, per-entry validation."""
+    if is_update:
+        error = _validate_uuid_field(arguments.get(role_id_field, ""), role_id_field)
+        if error:
+            return error
+    perms = arguments.get(perms_field) or []
+    if len(perms) > _MAX_PERMISSIONS_PER_ROLE:
+        return (
+            f"Role has {len(perms)} permissions, which exceeds the maximum of "
+            f"{_MAX_PERMISSIONS_PER_ROLE}. Split into multiple roles for better manageability."
+        )
+    for i, perm in enumerate(perms):
+        error = per_perm_validator(perm, i)
+        if error:
+            return error
+    return None
+
+
+def _validate_add_roles_to_group(arguments: dict[str, Any]) -> str | None:
+    """Validate add_roles_to_group: group_uuid and each role UUID."""
+    error = _validate_uuid_field(arguments.get("group_uuid", ""), "group_uuid")
+    if error:
+        return error
+    return _validate_uuid_list(arguments.get("roles"), "roles")
+
+
+def _validate_create_role_bindings(arguments: dict[str, Any]) -> str | None:
+    """Validate create_role_bindings: UUID fields across all binding entries."""
+    for i, binding in enumerate(arguments.get("bindings") or []):
+        if not isinstance(binding, dict):
+            continue
+        role_val = binding.get("role", "")
+        if isinstance(role_val, str) and role_val:
+            error = _validate_uuid_field(role_val, f"bindings[{i}].role")
+            if error:
+                return error
+        resource = binding.get("resource") or {}
+        if isinstance(resource, dict):
+            res_id = resource.get("id", "")
+            if isinstance(res_id, str) and res_id:
+                error = _validate_uuid_field(res_id, f"bindings[{i}].resource.id")
+                if error:
+                    return error
+        subject = binding.get("subject") or {}
+        if isinstance(subject, dict):
+            sub_id = subject.get("id", "")
+            if isinstance(sub_id, str) and sub_id:
+                error = _validate_uuid_field(sub_id, f"bindings[{i}].subject.id")
+                if error:
+                    return error
+    return None
+
+
+def _validate_workspace_args(arguments: dict[str, Any]) -> str | None:
+    """Validate update_workspace/move_workspace: workspace_id and optional parent_id."""
+    error = _validate_uuid_field(arguments.get("workspace_id", ""), "workspace_id")
+    if error:
+        return error
+    parent = arguments.get("parent_id", "")
+    if parent:
+        return _validate_uuid_field(parent, "parent_id")
+    return None
+
+
+def _validate_update_role_binding(arguments: dict[str, Any]) -> str | None:
+    """Validate update_role_binding: resource_id, subject_id, and role IDs."""
+    error = _validate_uuid_field(arguments.get("resource_id", ""), "resource_id")
+    if error:
+        return error
+    error = _validate_uuid_field(arguments.get("subject_id", ""), "subject_id")
+    if error:
+        return error
+    for i, role in enumerate(arguments.get("roles") or []):
+        if isinstance(role, dict):
+            error = _validate_uuid_field(role.get("id", ""), f"roles[{i}].id")
+            if error:
+                return error
+    return None
+
+
+_WRITE_VALIDATORS: dict[str, Callable[[dict[str, Any]], str | None]] = {
+    "create_role_v1": lambda args: _validate_role_permissions(
+        args,
+        is_update=False,
+        role_id_field="role_uuid",
+        perms_field="access",
+        per_perm_validator=_validate_v1_perm_entry,
+    ),
+    "update_role_v1": lambda args: _validate_role_permissions(
+        args,
+        is_update=True,
+        role_id_field="role_uuid",
+        perms_field="access",
+        per_perm_validator=_validate_v1_perm_entry,
+    ),
+    "create_role": lambda args: _validate_role_permissions(
+        args,
+        is_update=False,
+        role_id_field="role_uuid",
+        perms_field="permissions",
+        per_perm_validator=_validate_v2_perm_entry,
+    ),
+    "update_role": lambda args: _validate_role_permissions(
+        args,
+        is_update=True,
+        role_id_field="role_uuid",
+        perms_field="permissions",
+        per_perm_validator=_validate_v2_perm_entry,
+    ),
+    "patch_role_v1": lambda args: _validate_uuid_field(args.get("role_uuid", ""), "role_uuid"),
+    "add_roles_to_group": _validate_add_roles_to_group,
+    "create_role_bindings": _validate_create_role_bindings,
+    "delete_role_v1": lambda args: _validate_uuid_field(args.get("role_uuid", ""), "role_uuid"),
+    "bulk_delete_roles": lambda args: _validate_uuid_list(args.get("ids"), "ids"),
+    "update_workspace": _validate_workspace_args,
+    "move_workspace": _validate_workspace_args,
+    "delete_workspace": lambda args: _validate_uuid_field(args.get("workspace_uuid", ""), "workspace_uuid"),
+    "update_role_binding": _validate_update_role_binding,
+    "update_cross_account_request": lambda args: _validate_uuid_field(args.get("request_id", ""), "request_id"),
+    "patch_cross_account_request": lambda args: _validate_uuid_field(args.get("request_id", ""), "request_id"),
+}
+
+
+def _validate_write_payload(tool_name: str, arguments: dict[str, Any]) -> str | None:
+    """Validate semantic constraints on write tool arguments.
+
+    Runs after JSON schema validation to catch domain-specific issues:
+    - Permission strings match 'application:resource_type:verb' format
+    - UUID arguments are valid UUID format
+    - Permission counts don't exceed limits
+    """
+    validator = _WRITE_VALIDATORS.get(tool_name)
+    if validator is None:
+        return None
+    return validator(arguments)
+
+
 def _is_v2_available() -> bool:
     """Check whether V2 API routes are mounted."""
     return getattr(settings, "V2_APIS_ENABLED", False)
@@ -5293,6 +5868,11 @@ def _is_write_enabled() -> bool:
 def _is_write_confirmation_enabled() -> bool:
     """Check whether write tools require user confirmation before executing."""
     return getattr(settings, "MCP_WRITE_CONFIRMATION", True)
+
+
+def _is_pii_redaction_enabled() -> bool:
+    """Check whether PII is redacted from MCP tool responses."""
+    return getattr(settings, "MCP_PII_REDACTION_ENABLED", True)
 
 
 # --- Write confirmation token system ---
@@ -5447,6 +6027,38 @@ _MCP_TOOL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="mcp-tool",
 )
 
+_shutdown_in_progress = threading.Event()
+
+
+def mcp_shutdown() -> None:
+    """Gracefully shut down MCP resources.
+
+    Idempotent — safe to call multiple times (atexit + Gunicorn worker_exit).
+    """
+    if _shutdown_in_progress.is_set():
+        return
+    _shutdown_in_progress.set()
+
+    shutdown_timeout = settings.MCP_SHUTDOWN_TIMEOUT_SECONDS
+    logger.info("mcp: shutting down ThreadPoolExecutor (timeout=%ss)...", shutdown_timeout)
+    t = threading.Thread(target=_MCP_TOOL_EXECUTOR.shutdown, kwargs={"wait": True, "cancel_futures": True})
+    t.start()
+    t.join(timeout=shutdown_timeout)
+    if t.is_alive():
+        logger.warning("mcp: ThreadPoolExecutor shutdown timed out after %ss", shutdown_timeout)
+
+    try:
+        pool = _get_connection_pool()
+        if pool is not None:
+            pool.disconnect()
+    except Exception:
+        logger.debug("mcp: Redis connection pool disconnect failed (non-fatal)", exc_info=True)
+
+    logger.info("mcp: shutdown complete")
+
+
+atexit.register(mcp_shutdown)
+
 
 def _execute_with_timeout(fn: Callable[..., Any], timeout: int, *args: Any, **kwargs: Any) -> Any:
     """Execute a tool function with a timeout.
@@ -5599,6 +6211,17 @@ def _handle_tools_call(request: HttpRequest, request_id: Any, params: dict[str, 
 
     confirmation_token = arguments.pop("confirmation_token", None)
 
+    validation_error = _validate_tool_arguments(tool_name, arguments)
+    if validation_error:
+        logger.warning("mcp: tools/call tool='%s' schema validation failed: %s", tool_name, validation_error)
+        return _error_response(request_id, -32602, f"Invalid params for tool '{tool_name}': {validation_error}")
+
+    if config.write:
+        write_error = _validate_write_payload(tool_name, arguments)
+        if write_error:
+            logger.warning("mcp: tools/call tool='%s' write payload validation failed: %s", tool_name, write_error)
+            return _error_response(request_id, -32602, f"Invalid params for tool '{tool_name}': {write_error}")
+
     if config.write and _is_write_confirmation_enabled():
         if confirmation_token:
             valid, error_msg = _validate_confirmation_token(confirmation_token, tool_name, arguments, org_id)
@@ -5688,3 +6311,19 @@ def _success_response(request_id: Any, result: dict[str, Any]) -> JsonResponse:
 def _error_response(request_id: Any, code: int, message: str) -> JsonResponse:
     """Create a JSON-RPC error response."""
     return JsonResponse({"jsonrpc": "2.0", "error": {"code": code, "message": message}, "id": request_id})
+
+
+# --- Health check endpoint (unauthenticated, for Kubernetes probes) ---
+
+
+@csrf_exempt
+def mcp_health(request: HttpRequest) -> JsonResponse:
+    """Readiness probe for the MCP subsystem — no auth required.
+
+    Returns 200 while the subsystem is accepting requests and 503 once
+    shutdown has begun, so Kubernetes removes the pod from Service
+    endpoints and lets in-flight requests drain.
+    """
+    if _shutdown_in_progress.is_set():
+        return JsonResponse({"status": "shutting_down"}, status=503)
+    return JsonResponse({"status": "ok"})

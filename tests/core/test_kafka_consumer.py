@@ -49,9 +49,13 @@ from core.kafka_consumer import (
     RBACKafkaConsumer,
     ReplicationMessage,
     RetryConfig,
+    _save_consistency_token_best_effort,
+    consistency_token_save_total,
 )
+from django.db import OperationalError
 from django.test import TestCase
 from django.test.utils import override_settings
+from internal.migration_coordination import MigrationNotifyCoordination
 from kafka.errors import KafkaError
 
 
@@ -639,14 +643,9 @@ class RBACKafkaConsumerTests(TestCase):
     @patch("core.kafka_consumer.json_format.ParseDict")
     @patch("core.kafka_consumer.relations_api_replication.write_relationships")
     @patch("core.kafka_consumer.relations_api_replication.delete_relationships")
-    @patch("core.kafka_consumer.Tenant.objects.get")
-    def test_process_relations_message_success(self, mock_tenant_get, mock_delete, mock_write, mock_parse_dict):
+    @patch("core.kafka_consumer._save_consistency_token_best_effort")
+    def test_process_relations_message_success(self, mock_save_token, mock_delete, mock_write, mock_parse_dict):
         """Test successful relations message processing."""
-        # Mock tenant lookup
-        mock_tenant = Mock()
-        mock_tenant.org_id = "12345"
-        mock_tenant_get.return_value = mock_tenant
-
         # Mock protobuf conversion
         mock_relationship_pb = Mock()
         mock_parse_dict.return_value = mock_relationship_pb
@@ -691,7 +690,7 @@ class RBACKafkaConsumerTests(TestCase):
         result = consumer._process_relations_message(debezium_msg, 0, 0)
 
         self.assertTrue(result)
-        mock_tenant_get.assert_called_once_with(org_id="12345")
+        mock_save_token.assert_called_once_with("12345", "test-token-123", "test-id-123")
         mock_write.assert_called_once()
         mock_delete.assert_called_once()
 
@@ -710,19 +709,22 @@ class RBACKafkaConsumerTests(TestCase):
         self.assertEqual(delete_fencing_check.lock_id, "test-group/0")
         self.assertEqual(delete_fencing_check.lock_token, "test-lock-token")
 
-    @patch("core.kafka_consumer.REMOVE_LEGACY_ROOT_WORKSPACE_PARENT_NOTIFY_CHANNEL", "test_legacy_ch")
+    @patch("internal.migration_coordination.migration_notify_coordination")
     @patch("core.kafka_consumer.connection.cursor")
     @patch("core.kafka_consumer.json_format.ParseDict")
     @patch("core.kafka_consumer.relations_api_replication.write_relationships")
     @patch("core.kafka_consumer.relations_api_replication.delete_relationships")
-    @patch("core.kafka_consumer.Tenant.objects.get")
+    @patch("core.kafka_consumer._save_consistency_token_best_effort")
     def test_process_relations_message_remove_legacy_root_parent_sends_notify(
-        self, mock_tenant_get, mock_delete, mock_write, mock_parse_dict, mock_conn_cursor
+        self, mock_save_token, mock_delete, mock_write, mock_parse_dict, mock_conn_cursor, mock_coordination
     ):
         """Consumer NOTIFYs after remove_root_parent_tenant_relationships batch replication."""
         from management.relation_replicator.relation_replicator import ReplicationEventType
 
-        mock_tenant_get.return_value = Mock(org_id="12345")
+        mock_coordination.return_value = MigrationNotifyCoordination(
+            channel="test_legacy_ch",
+            log_label="test_remove_legacy",
+        )
         mock_parse_dict.return_value = Mock()
         mock_write.return_value = Mock(consistency_token=Mock(token="tok"))
         mock_delete.return_value = Mock(consistency_token=Mock(token=None))
@@ -763,6 +765,63 @@ class RBACKafkaConsumerTests(TestCase):
         notify_sql_calls = [c for c in mock_cursor.execute.call_args_list if "PG_NOTIFY" in str(c[0][0]).upper()]
         self.assertEqual(len(notify_sql_calls), 1)
         self.assertEqual(notify_sql_calls[0][0][1], ["test_legacy_ch", "batch-ack-token"])
+
+    @patch("internal.migration_coordination.migration_notify_coordination")
+    @patch("core.kafka_consumer.connection.cursor")
+    @patch("core.kafka_consumer.json_format.ParseDict")
+    @patch("core.kafka_consumer.relations_api_replication.write_relationships")
+    @patch("core.kafka_consumer.relations_api_replication.delete_relationships")
+    @patch("core.kafka_consumer._save_consistency_token_best_effort")
+    def test_process_relations_message_migrate_binding_scope_sends_notify(
+        self, mock_save_token, mock_delete, mock_write, mock_parse_dict, mock_conn_cursor, mock_coordination
+    ):
+        """Consumer NOTIFYs after migrate_binding_scope batch replication."""
+        from management.relation_replicator.relation_replicator import ReplicationEventType
+
+        mock_coordination.return_value = MigrationNotifyCoordination(
+            channel="test_migrate_binding_scope_ch",
+            log_label="test_migrate_binding_scope",
+        )
+        mock_parse_dict.return_value = Mock()
+        mock_write.return_value = Mock(consistency_token=Mock(token="tok"))
+        mock_delete.return_value = Mock(consistency_token=Mock(token=None))
+
+        mock_cursor = Mock()
+        mock_cm = Mock()
+        mock_cm.__enter__ = Mock(return_value=mock_cursor)
+        mock_cm.__exit__ = Mock(return_value=False)
+        mock_conn_cursor.return_value = mock_cm
+
+        consumer = RBACKafkaConsumer()
+        consumer.lock_id = "test-group/0"
+        consumer.lock_token = "test-lock-token"
+
+        debezium_msg = DebeziumMessage(
+            aggregatetype="relations",
+            aggregateid="test-id",
+            event_type=ReplicationEventType.MIGRATE_BINDING_SCOPE.value,
+            payload={
+                "relations_to_add": [],
+                "relations_to_remove": [
+                    {
+                        "resource": {"type": "rbac", "id": "role1"},
+                        "subject": {"type": "rbac", "id": "binding1"},
+                        "relation": "member",
+                    }
+                ],
+                "resource_context": {
+                    "org_id": "12345",
+                    "event_type": ReplicationEventType.MIGRATE_BINDING_SCOPE.value,
+                    "notify_token": "migrate-scope-ack-token",
+                },
+            },
+        )
+
+        self.assertTrue(consumer._process_relations_message(debezium_msg, 0, 0))
+
+        notify_sql_calls = [c for c in mock_cursor.execute.call_args_list if "PG_NOTIFY" in str(c[0][0]).upper()]
+        self.assertEqual(len(notify_sql_calls), 1)
+        self.assertEqual(notify_sql_calls[0][0][1], ["test_migrate_binding_scope_ch", "migrate-scope-ack-token"])
 
     def test_process_relations_message_invalid_payload(self):
         """Test relations message processing with invalid payload raises ValidationError."""
@@ -1940,3 +1999,83 @@ class FencingTokenErrorHandlingTests(TestCase):
         # Should re-raise the gRPC error (not RuntimeError)
         with self.assertRaises(grpc.RpcError):
             self.consumer._process_relations_message(debezium_msg, 0, 0)
+
+
+class SaveConsistencyTokenBestEffortTests(TestCase):
+    """Tests for _save_consistency_token_best_effort."""
+
+    @patch("core.kafka_consumer.Tenant.objects")
+    @patch("core.kafka_consumer.connection.cursor")
+    def test_success(self, mock_cursor_ctx, mock_tenant_objects):
+        """Token is saved via UPDATE and success metric incremented."""
+        mock_cursor = Mock()
+        mock_cm = Mock()
+        mock_cm.__enter__ = Mock(return_value=mock_cursor)
+        mock_cm.__exit__ = Mock(return_value=False)
+        mock_cursor_ctx.return_value = mock_cm
+
+        mock_qs = Mock()
+        mock_qs.update.return_value = 1
+        mock_tenant_objects.filter.return_value = mock_qs
+
+        before = consistency_token_save_total.labels(status="success")._value.get()
+        _save_consistency_token_best_effort("org123", "token-abc", "agg-1")
+
+        mock_tenant_objects.filter.assert_called_once_with(org_id="org123")
+        mock_qs.update.assert_called_once_with(relations_consistency_token="token-abc")
+        after = consistency_token_save_total.labels(status="success")._value.get()
+        self.assertEqual(after - before, 1)
+
+    @patch("core.kafka_consumer.Tenant.objects")
+    @patch("core.kafka_consumer.connection.cursor")
+    def test_lock_timeout_does_not_raise(self, mock_cursor_ctx, mock_tenant_objects):
+        """OperationalError with lock timeout is swallowed and metric recorded."""
+        mock_cursor = Mock()
+        mock_cm = Mock()
+        mock_cm.__enter__ = Mock(return_value=mock_cursor)
+        mock_cm.__exit__ = Mock(return_value=False)
+        mock_cursor_ctx.return_value = mock_cm
+
+        mock_qs = Mock()
+        mock_qs.update.side_effect = OperationalError("canceling statement due to lock timeout")
+        mock_tenant_objects.filter.return_value = mock_qs
+
+        before = consistency_token_save_total.labels(status="lock_timeout")._value.get()
+        _save_consistency_token_best_effort("org123", "token-abc", "agg-1")
+        after = consistency_token_save_total.labels(status="lock_timeout")._value.get()
+        self.assertEqual(after - before, 1)
+
+    @patch("core.kafka_consumer.Tenant.objects")
+    @patch("core.kafka_consumer.connection.cursor")
+    def test_other_operational_error_does_not_raise(self, mock_cursor_ctx, mock_tenant_objects):
+        """Non-lock OperationalError is caught and recorded as error."""
+        mock_cursor = Mock()
+        mock_cm = Mock()
+        mock_cm.__enter__ = Mock(return_value=mock_cursor)
+        mock_cm.__exit__ = Mock(return_value=False)
+        mock_cursor_ctx.return_value = mock_cm
+
+        mock_qs = Mock()
+        mock_qs.update.side_effect = OperationalError("connection reset by peer")
+        mock_tenant_objects.filter.return_value = mock_qs
+
+        before = consistency_token_save_total.labels(status="error")._value.get()
+        _save_consistency_token_best_effort("org123", "token-abc", "agg-1")
+        after = consistency_token_save_total.labels(status="error")._value.get()
+        self.assertEqual(after - before, 1)
+
+    @patch("core.kafka_consumer.Tenant.objects")
+    @patch("core.kafka_consumer.connection.cursor")
+    def test_tenant_not_found(self, mock_cursor_ctx, mock_tenant_objects):
+        """Zero rows updated logs a warning but does not raise."""
+        mock_cursor = Mock()
+        mock_cm = Mock()
+        mock_cm.__enter__ = Mock(return_value=mock_cursor)
+        mock_cm.__exit__ = Mock(return_value=False)
+        mock_cursor_ctx.return_value = mock_cm
+
+        mock_qs = Mock()
+        mock_qs.update.return_value = 0
+        mock_tenant_objects.filter.return_value = mock_qs
+
+        _save_consistency_token_best_effort("org-missing", "token-abc", "agg-1")
