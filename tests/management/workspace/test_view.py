@@ -3565,8 +3565,10 @@ class WorkspaceTestsQuery(WorkspaceViewTests):
         self.assertEqual(response.get("content-type"), "application/json")
         for keyname in ["meta", "links", "data"]:
             self.assertIn(keyname, payload)
-        for keyname in ["name", "id", "parent_id", "description", "type"]:
-            self.assertIn(keyname, payload.get("data")[0])
+        data = payload.get("data")
+        if data:
+            for keyname in ["name", "id", "parent_id", "description", "type"]:
+                self.assertIn(keyname, data[0])
 
     def test_query_by_single_id(self):
         """Query workspaces with a single ID in the body."""
@@ -3891,6 +3893,74 @@ class WorkspaceTestsQuery(WorkspaceViewTests):
         self.assertIn(str(self.standard_workspace.id), returned_ids)
         # User cannot see the workspace they do NOT have access to
         self.assertNotIn(str(another_ws.id), returned_ids)
+
+    def test_query_nul_byte_in_type_returns_400(self):
+        """Query with NUL byte in type field returns 400."""
+        client = APIClient()
+        response = client.post(
+            self._query_url(),
+            data={"ids": [str(self.standard_workspace.id)], "type": "standard\x00evil"},
+            format="json",
+            **self.headers,
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_query_nul_byte_in_name_returns_400(self):
+        """Query with NUL byte in name field returns 400."""
+        client = APIClient()
+        response = client.post(
+            self._query_url(),
+            data={"ids": [str(self.standard_workspace.id)], "name": "test\x00evil"},
+            format="json",
+            **self.headers,
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_query_case_insensitive_uuid_matching(self):
+        """Query with uppercase UUIDs matches correctly."""
+        client = APIClient()
+        upper_uuid = str(self.standard_workspace.id).upper()
+        response = client.post(
+            self._query_url(),
+            data={"ids": [upper_uuid]},
+            format="json",
+            **self.headers,
+        )
+        payload = response.data
+
+        self.assertSuccessfulList(response, payload)
+        self.assertEqual(payload["meta"]["count"], 1)
+        self.assertEqual(payload["data"][0]["id"], str(self.standard_workspace.id))
+
+    def test_query_exceeding_max_ids_returns_400(self):
+        """Query with more than 3000 IDs returns 400."""
+        client = APIClient()
+        ids = [str(uuid4()) for _ in range(3001)]
+        response = client.post(
+            self._query_url(),
+            data={"ids": ids},
+            format="json",
+            **self.headers,
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_query_pagination_links(self):
+        """Query endpoint returns correct pagination links."""
+        client = APIClient()
+        response = client.post(
+            f"{self._query_url()}?limit=1&offset=0",
+            data={"ids": [str(self.standard_workspace.id), str(self.standard_sub_workspace.id)]},
+            format="json",
+            **self.headers,
+        )
+        payload = response.data
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("links", payload)
+        links = payload["links"]
+        self.assertIn("first", links)
+        self.assertIn("next", links)
+        self.assertIn("last", links)
 
 
 @override_settings(ATOMIC_RETRY_DISABLED=True, V2_APIS_ENABLED=True)

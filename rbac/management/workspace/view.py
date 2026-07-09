@@ -190,6 +190,24 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
         """Get a workspace."""
         return super().retrieve(request=request, args=args, kwargs=kwargs)
 
+    def _filtered_list_response(self, validated_params):
+        """Shared implementation for list and query actions.
+
+        Both endpoints produce the same paginated workspace response; the only
+        difference is how validated_params are obtained (query string vs POST body).
+        """
+        # Bridge param to access layer; read by WorkspaceAccessFilterBackend
+        # via getattr(request, "with_ancestry", False) and passed to
+        # is_user_allowed_v2(with_ancestry=...).
+        self.request.with_ancestry = validated_params.get("with_ancestry", False)
+
+        queryset = self.filter_queryset(self.get_queryset())
+        queryset = self._service.list(queryset, validated_params)
+
+        page = self.paginate_queryset(queryset)
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
+
     def list(self, request, *args, **kwargs):
         """Get a list of workspaces.
 
@@ -200,18 +218,7 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
         """
         input_serializer = WorkspaceListInputSerializer(data=request.query_params)
         input_serializer.is_valid(raise_exception=True)
-        validated_params = input_serializer.validated_data
-
-        # Bridge query param to access layer; read by WorkspaceAccessFilterBackend and
-        # passed explicitly to is_user_allowed_v2(with_ancestry=...).
-        request.with_ancestry = validated_params.get("with_ancestry", False)
-
-        queryset = self.filter_queryset(self.get_queryset())
-        queryset = self._service.list(queryset, validated_params)
-
-        page = self.paginate_queryset(queryset)
-        serializer = self.get_serializer(page, many=True)
-        return self.get_paginated_response(serializer.data)
+        return self._filtered_list_response(input_serializer.validated_data)
 
     @action(detail=False, methods=["post"], url_path="query")
     def query(self, request, *args, **kwargs):
@@ -228,16 +235,7 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
         """
         input_serializer = WorkspaceQueryInputSerializer(data=request.data)
         input_serializer.is_valid(raise_exception=True)
-        validated_params = input_serializer.validated_data
-
-        request.with_ancestry = validated_params.get("with_ancestry", False)
-
-        queryset = self.filter_queryset(self.get_queryset())
-        queryset = self._service.list(queryset, validated_params)
-
-        page = self.paginate_queryset(queryset)
-        serializer = self.get_serializer(page, many=True)
-        return self.get_paginated_response(serializer.data)
+        return self._filtered_list_response(input_serializer.validated_data)
 
     @atomic_with_retry(retries=3)
     def destroy(self, request, *args, **kwargs):
