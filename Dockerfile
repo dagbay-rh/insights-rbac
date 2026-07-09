@@ -123,14 +123,22 @@ FROM registry.access.redhat.com/hi/python:3.12-fips
 
 ENV APP_ROOT=/opt/rbac \
     APP_HOME=/opt/rbac/rbac \
+    APP_CONFIG=/opt/rbac/rbac/gunicorn.py \
+    APP_MODULE=rbac.wsgi \
+    APP_NAMESPACE=rbac \
     VIRTUAL_ENV=/opt/rbac/.venv \
     PATH="/opt/rbac/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=UTF-8 \
+    LC_ALL=C.UTF-8 \
+    LANG=C.UTF-8 \
     PROMETHEUS_MULTIPROC_DIR=/tmp \
     LOG_DIRECTORY=/tmp
 
 WORKDIR ${APP_ROOT}
 
 COPY --from=base /usr/bin/curl /usr/bin/curl
+COPY --from=base /usr/bin/env /usr/bin/env
 COPY --from=base /usr/bin/bash /usr/bin/bash
 COPY --from=base /bin/sh /bin/sh
 COPY --from=base /usr/lib64/ /usr/lib64/
