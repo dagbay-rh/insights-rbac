@@ -1,5 +1,7 @@
 name: "JIRA ticket check"
 
+permissions: {}
+
 on:
   pull_request_target:
     types: [opened, edited]
@@ -21,7 +23,7 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          if echo "$PR_TITLE" | grep -qE '\[RHCLOUD-[0-9]+\]'; then
+          if printf '%s\n' "$PR_TITLE" | grep -qE '\[RHCLOUD-[0-9]+\]'; then
             echo "✅ JIRA ticket found in PR title"
           else
             echo "❌ PR title must contain a JIRA ticket reference in the format [RHCLOUD-XXXXX]"
