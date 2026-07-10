@@ -119,7 +119,7 @@ ARG GIT_COMMIT=undefined
 ENV GIT_COMMIT=${GIT_COMMIT}
 
 # Runtime stage
-FROM registry.access.redhat.com/hi/python:3.12-fips
+FROM registry.access.redhat.com/hi/core-runtime:2.42-openssl-fips
 
 ENV APP_ROOT=/opt/rbac \
     APP_HOME=/opt/rbac/rbac \
@@ -137,10 +137,8 @@ ENV APP_ROOT=/opt/rbac \
 
 WORKDIR ${APP_ROOT}
 
-COPY --from=base /usr/bin/curl /usr/bin/curl
-COPY --from=base /usr/bin/env /usr/bin/env
-COPY --from=base /usr/bin/bash /usr/bin/bash
-COPY --from=base /bin/sh /bin/sh
+# Python binaries (not included in core-runtime)
+COPY --from=base /usr/bin/python3 /usr/bin/python3.12 /usr/bin/
 COPY --from=base /usr/lib64/ /usr/lib64/
 COPY --from=base /opt/rbac /opt/rbac
 COPY --from=base /licenses /licenses
