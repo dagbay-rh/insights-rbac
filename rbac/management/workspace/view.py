@@ -330,7 +330,9 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
 
         cache_key = None
         if org_id and cacheable_type:
-            offset, limit, order_by = _normalize_cache_params(self.request.query_params, self.pagination_class.max_limit)
+            offset, limit, order_by = _normalize_cache_params(
+                self.request.query_params, self.pagination_class.max_limit
+            )
             cache_key = _workspace_list_cache_key(cacheable_type, offset, limit, order_by)
             cached = _get_cached_response(org_id, cache_key)
             if cached is not None:
