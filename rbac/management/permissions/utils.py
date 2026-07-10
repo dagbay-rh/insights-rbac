@@ -71,9 +71,13 @@ def check_v2_kessel_access(request, relation=KESSEL_READ_RELATION):
         logger.debug("V2 Kessel fallback denied: could not determine principal ID")
         return False
 
-    return WorkspaceInventoryAccessChecker().check_resource_access(
-        resource_type="tenant",
-        resource_id=resource_id,
-        principal_id=principal_id,
-        relation=relation,
-    )
+    try:
+        return WorkspaceInventoryAccessChecker().check_resource_access(
+            resource_type="tenant",
+            resource_id=resource_id,
+            principal_id=principal_id,
+            relation=relation,
+        )
+    except Exception as e:
+        logger.warning("V2 Kessel fallback: resource access check failed: %s: %s", type(e).__name__, e)
+        return False

@@ -23,6 +23,7 @@ endpoints when Kessel grants access.
 
 from unittest.mock import Mock, patch
 
+import grpc
 from django.test import TestCase
 
 from api.models import User
@@ -130,6 +131,25 @@ class CheckV2KesselAccessTest(TestCase):
         mock_logger.warning.assert_called_once()
         warning_msg = mock_logger.warning.call_args[0][0]
         self.assertIn("is_v2_write_activated check failed", warning_msg)
+
+    @patch("management.permissions.utils.logger")
+    @patch(
+        "management.permissions.workspace_inventory_access.WorkspaceInventoryAccessChecker.check_resource_access",
+        side_effect=grpc.RpcError(),
+    )
+    @patch("management.principal.proxy.get_kessel_principal_id", return_value="localhost/test-user")
+    @patch("management.tenant_mapping.v2_activation.TenantMapping")
+    def test_returns_false_when_kessel_raises_grpc_error(self, mock_tm, mock_pid, mock_check, mock_logger):
+        """gRPC error from Kessel should log warning and return False (fail-closed)."""
+        mock_tm.objects.get.return_value = Mock(v2_write_activated_at="2026-01-01")
+        tenant = Mock()
+        tenant.tenant_resource_id.return_value = "localhost/org-123"
+        req = self._make_request(tenant=tenant)
+        result = check_v2_kessel_access(req)
+        self.assertFalse(result)
+        mock_logger.warning.assert_called_once()
+        warning_msg = mock_logger.warning.call_args[0][0]
+        self.assertIn("resource access check failed", warning_msg)
 
     @patch("management.permissions.workspace_inventory_access.WorkspaceInventoryAccessChecker.check_resource_access")
     @patch("management.principal.proxy.get_kessel_principal_id", return_value="localhost/test-user")
@@ -286,6 +306,20 @@ class RoleAccessV2FallbackTest(TestCase):
         self.assertFalse(RoleAccessPermission().has_permission(req, None))
         mock_kessel.assert_not_called()
 
+    @patch(_PATCH_ROLE, return_value=True)
+    def test_system_param_bypass_skips_kessel_check(self, mock_kessel):
+        """System roles query should bypass without calling Kessel."""
+        req = _make_v2_request(query_params={"system": "true"})
+        self.assertTrue(RoleAccessPermission().has_permission(req, None))
+        mock_kessel.assert_not_called()
+
+    @patch(_PATCH_ROLE, return_value=True)
+    def test_scope_principal_bypass_skips_kessel_check(self, mock_kessel):
+        """Scope=principal read should bypass without calling Kessel."""
+        req = _make_v2_request(query_params={"scope": "principal"})
+        self.assertTrue(RoleAccessPermission().has_permission(req, None))
+        mock_kessel.assert_not_called()
+
 
 class GroupAccessV2FallbackTest(TestCase):
     """Test GroupAccessPermission with V2 Kessel fallback."""
@@ -342,3 +376,31 @@ class GroupAccessV2FallbackTest(TestCase):
         req = _make_v2_request()
         self.assertTrue(GroupAccessPermission().has_permission(req, view))
         mock_kessel.assert_called_once_with(req)
+
+    @patch(_PATCH_GROUP, return_value=True)
+    def test_scope_principal_bypass_skips_kessel_check(self, mock_kessel):
+        """Scope=principal read on list should bypass without calling Kessel."""
+        req = _make_v2_request(query_params={"scope": "principal"})
+        self.assertTrue(GroupAccessPermission().has_permission(req, self.view))
+        mock_kessel.assert_not_called()
+
+    @patch(_PATCH_GROUP, return_value=True)
+    def test_principals_write_skips_kessel_fallback(self, mock_kessel):
+        """POST to group principals should be denied without calling Kessel."""
+        view = Mock()
+        view.action = "principals"
+        view.basename = "group"
+        req = _make_v2_request(method="POST")
+        self.assertFalse(GroupAccessPermission().has_permission(req, view))
+        mock_kessel.assert_not_called()
+
+    @patch(_PATCH_GROUP, return_value=True)
+    def test_detail_write_actions_skip_kessel(self, mock_kessel):
+        """Detail write actions (update, partial_update, destroy) should skip Kessel."""
+        for action, method in [("update", "PUT"), ("partial_update", "PATCH"), ("destroy", "DELETE")]:
+            mock_kessel.reset_mock()
+            view = Mock(action=action, basename="group")
+            req = _make_v2_request(method=method)
+            result = GroupAccessPermission().has_permission(req, view)
+            self.assertFalse(result, f"{method} {action} should be denied")
+            mock_kessel.assert_not_called()
