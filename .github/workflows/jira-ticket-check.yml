@@ -1,6 +1,7 @@
 name: "JIRA ticket check"
 
-permissions: {}
+permissions:
+  pull-requests: write
 
 on:
   pull_request_target:
@@ -14,22 +15,26 @@ concurrency:
 jobs:
   jira-ticket-check:
     runs-on: ubuntu-latest
-    # For 'edited' events, only run when the title actually changed.
     if: >-
-      github.event.action == 'opened' ||
-      github.event.changes.title.from != ''
+      !contains(github.event.pull_request.labels.*.name, 'bot') &&
+      (github.event.action == 'opened' ||
+      github.event.changes.title.from != '')
     steps:
       - name: Check PR title for JIRA ticket
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           if printf '%s\n' "$PR_TITLE" | grep -qE '\[RHCLOUD-[0-9]+\]'; then
             echo "✅ JIRA ticket found in PR title"
           else
             echo "❌ PR title must contain a JIRA ticket reference in the format [RHCLOUD-XXXXX]"
-            echo ""
-            echo "Current title: $PR_TITLE"
-            echo ""
-            echo "Example: feat: add new feature [RHCLOUD-12345]"
+            printf -v COMMENT '%s\n\n%s\n\n%s' \
+              '❌ **Missing JIRA ticket in PR title**' \
+              'PR title must contain a JIRA ticket reference in the format `[RHCLOUD-XXXXX]`.' \
+              '**Example:** `feat: add new feature [RHCLOUD-12345]`'
+            gh pr comment "$PR_NUMBER" --body "$COMMENT"
             exit 1
           fi
