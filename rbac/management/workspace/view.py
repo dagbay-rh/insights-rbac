@@ -77,14 +77,15 @@ def _workspace_list_cache_key(ws_type: str, offset: str, limit: str, order_by: s
 _WORKSPACE_ORDERING_FIELDS = frozenset(("name", "created", "modified", "type"))
 
 
-def _normalize_cache_params(query_params, max_limit: int = 3000):
+def _normalize_cache_params(query_params, max_limit: int = 3000, default_limit: int = 10):
     """Normalize and validate pagination/ordering params for cache key construction.
 
     Ensures cache keys match the actual paginated response regardless of raw input:
     - offset: non-negative integer, default 0
-    - limit: positive integer clamped to [1, max_limit], default 10
+    - limit: positive integer clamped to [1, max_limit], default default_limit
     - order_by: must be a recognised field (with optional '-' prefix), default 'name'
 
+    Non-positive limit values use default_limit to match DRF paginator behavior.
     This prevents cache pollution from arbitrary strings and avoids key/content
     mismatches when the paginator clamps values differently from the raw input.
     """
@@ -94,10 +95,10 @@ def _normalize_cache_params(query_params, max_limit: int = 3000):
         offset = 0
 
     try:
-        limit = int(query_params.get("limit", "10"))
-        limit = max(1, min(limit, max_limit))
+        limit = int(query_params.get("limit", str(default_limit)))
+        limit = min(limit, max_limit) if limit > 0 else default_limit
     except (ValueError, TypeError):
-        limit = 10
+        limit = default_limit
 
     order_by = query_params.get("order_by", "name")
     field = order_by.lstrip("-")

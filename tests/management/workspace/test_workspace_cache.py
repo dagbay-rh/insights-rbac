@@ -51,8 +51,9 @@ class WorkspaceCacheClassTests(IdentityRequest):
 
     def tearDown(self):
         """Clean up."""
-        Workspace.objects.update(parent=None)
-        Workspace.objects.all().delete()
+        Workspace.objects.filter(tenant=self.tenant).update(parent=None)
+        Workspace.objects.filter(tenant=self.tenant).delete()
+        super().tearDown()
 
     def test_key_for(self):
         """Cache key follows expected pattern."""
@@ -138,8 +139,10 @@ class WorkspaceCacheClassTests(IdentityRequest):
     @patch.object(WorkspaceCache, "redis_health_check", return_value=False)
     def test_get_workspace_redis_down(self, mock_health):
         """Returns None when Redis is unreachable."""
+        self.cache._redis_mocked = False
         result = self.cache.get_workspace(self.tenant.org_id, "root")
         self.assertIsNone(result)
+        mock_health.assert_called_once()
 
     @patch.object(WorkspaceCache, "redis_health_check", return_value=False)
     def test_get_response_redis_down(self, mock_health):
@@ -173,8 +176,9 @@ class WorkspaceManagerCacheTests(IdentityRequest):
 
     def tearDown(self):
         """Clean up."""
-        Workspace.objects.update(parent=None)
-        Workspace.objects.all().delete()
+        Workspace.objects.filter(tenant=self.tenant).update(parent=None)
+        Workspace.objects.filter(tenant=self.tenant).delete()
+        super().tearDown()
 
     @patch.object(WorkspaceCache, "get_workspace", return_value=None)
     @patch.object(WorkspaceCache, "cache_workspace")
@@ -270,8 +274,10 @@ class WorkspaceCacheInvalidationTests(IdentityRequest):
 
     def tearDown(self):
         """Clean up."""
-        Workspace.objects.update(parent=None)
-        Workspace.objects.all().delete()
+        if self.tenant.pk is not None:
+            Workspace.objects.filter(tenant=self.tenant).update(parent=None)
+            Workspace.objects.filter(tenant=self.tenant).delete()
+        super().tearDown()
 
     @patch.object(WorkspaceCache, "delete_workspaces_for_tenant")
     def test_delete_tenant_invalidates_cache(self, mock_delete):
@@ -294,8 +300,9 @@ class WorkspaceCacheBootstrapTests(IdentityRequest):
 
     def tearDown(self):
         """Clean up."""
-        Workspace.objects.update(parent=None)
-        Workspace.objects.all().delete()
+        Workspace.objects.filter(tenant=self.tenant).update(parent=None)
+        Workspace.objects.filter(tenant=self.tenant).delete()
+        super().tearDown()
 
     @patch.object(WorkspaceCache, "delete_workspaces_for_tenant")
     def test_bootstrap_tenants_invalidates_cache(self, mock_delete):
@@ -343,8 +350,9 @@ class WorkspaceViewCacheTests(IdentityRequest):
 
     def tearDown(self):
         """Clean up."""
-        Workspace.objects.update(parent=None)
-        Workspace.objects.all().delete()
+        Workspace.objects.filter(tenant=self.tenant).update(parent=None)
+        Workspace.objects.filter(tenant=self.tenant).delete()
+        super().tearDown()
 
     @patch.object(WorkspaceCache, "cache_response")
     @patch.object(WorkspaceCache, "get_response", return_value=None)
@@ -545,8 +553,9 @@ class WorkspaceViewCacheTests(IdentityRequest):
 
         # ValidatedOrderingFilter rejects the invalid field, but cache lookup
         # already happened with the normalised key — preventing cache pollution.
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         mock_get.assert_called_once_with(self.tenant.org_id, "list::root::0::10::name")
-        # Response may be 400 (from ordering filter) — cache was not populated
+        # 400 from ordering filter — cache was not populated
         mock_cache.assert_not_called()
 
     @patch.object(WorkspaceCache, "cache_response")
@@ -588,8 +597,9 @@ class WorkspaceCacheMetricsTests(IdentityRequest):
 
     def tearDown(self):
         """Clean up."""
-        Workspace.objects.update(parent=None)
-        Workspace.objects.all().delete()
+        Workspace.objects.filter(tenant=self.tenant).update(parent=None)
+        Workspace.objects.filter(tenant=self.tenant).delete()
+        super().tearDown()
 
     @patch.object(WorkspaceCache, "get_from_redis", return_value=None)
     @patch.object(WorkspaceCache, "redis_health_check", return_value=True)

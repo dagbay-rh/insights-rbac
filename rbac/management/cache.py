@@ -487,7 +487,7 @@ class WorkspaceCache(BasicCache):
                 return None
             obj = self.connection.get(name=key)
             return json.loads(obj) if obj else None
-        except exceptions.RedisError:
+        except (exceptions.RedisError, json.JSONDecodeError, ValueError):
             logger.exception(err_msg)
             return None
 
@@ -557,11 +557,17 @@ class WorkspaceCache(BasicCache):
             for key in self.connection.scan_iter(match=f"rbac::workspace::{org_id}::*", count=BATCH_DELETE_SIZE):
                 pipeline.delete(key)
                 count += 1
+                if count % BATCH_DELETE_SIZE == 0:
+                    pipeline.execute()
+                    pipeline = self.connection.pipeline()
             for key in self.connection.scan_iter(
                 match=f"rbac::workspace::response::{org_id}::*", count=BATCH_DELETE_SIZE
             ):
                 pipeline.delete(key)
                 count += 1
+                if count % BATCH_DELETE_SIZE == 0:
+                    pipeline.execute()
+                    pipeline = self.connection.pipeline()
             pipeline.execute()
             logger.info(f"Deleted {count} workspace cache entries for tenant {org_id}")
 
