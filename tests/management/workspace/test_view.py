@@ -3962,6 +3962,63 @@ class WorkspaceTestsQuery(WorkspaceViewTests):
         self.assertIn("next", links)
         self.assertIn("last", links)
 
+    def test_query_with_ancestry(self):
+        """Query with with_ancestry=true includes ancestor/fallback workspaces."""
+        client = APIClient()
+        response = client.post(
+            self._query_url(),
+            data={
+                "ids": [str(self.standard_workspace.id)],
+                "with_ancestry": True,
+            },
+            format="json",
+            **self.headers,
+        )
+        payload = response.data
+
+        self.assertSuccessfulList(response, payload)
+        # with_ancestry expands access filter to include ancestors and fallback
+        # workspaces; for admin users with full access the parameter is accepted
+        # and the response still contains the requested workspace
+        returned_ids = [ws["id"] for ws in payload["data"]]
+        self.assertIn(str(self.standard_workspace.id), returned_ids)
+
+    def test_query_order_by_name_descending(self):
+        """Query endpoint respects order_by query parameter."""
+        client = APIClient()
+        response = client.post(
+            f"{self._query_url()}?order_by=-name",
+            data={"ids": [str(self.standard_workspace.id), str(self.standard_sub_workspace.id)]},
+            format="json",
+            **self.headers,
+        )
+        payload = response.data
+
+        self.assertSuccessfulList(response, payload)
+        self.assertEqual(payload["meta"]["count"], 2)
+        names = [ws["name"] for ws in payload["data"]]
+        self.assertEqual(names, sorted(names, reverse=True))
+
+    def test_query_empty_and_whitespace_optional_fields(self):
+        """Query with empty or whitespace-only name/type treats them as unset."""
+        client = APIClient()
+        # Empty string name and whitespace-only type should be normalized to None
+        response = client.post(
+            self._query_url(),
+            data={
+                "ids": [str(self.standard_workspace.id), str(self.standard_sub_workspace.id)],
+                "name": "",
+                "type": "   ",
+            },
+            format="json",
+            **self.headers,
+        )
+        payload = response.data
+
+        self.assertSuccessfulList(response, payload)
+        # Both workspaces returned because empty filters are ignored
+        self.assertEqual(payload["meta"]["count"], 2)
+
 
 @override_settings(ATOMIC_RETRY_DISABLED=True, V2_APIS_ENABLED=True)
 class WorkspaceTestsDetail(WorkspaceViewTests):
