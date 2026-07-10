@@ -203,7 +203,7 @@ class WorkspaceAccessPermission(permissions.BasePermission):
             log_ctx = _build_s2s_log_context(request, view, ws_id)
             logger.info("S2S system user access denied: not admin %s", log_ctx)
 
-        op = operation_from_request(request)
+        op = operation_from_request(request, view)
         if not is_user_allowed_v1(request, op, ws_id):
             return False
 
