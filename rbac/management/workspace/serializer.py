@@ -19,6 +19,7 @@
 
 import re
 import uuid
+from collections.abc import Mapping
 
 from management.workspace.service import WorkspaceService
 from rest_framework import serializers
@@ -40,10 +41,16 @@ class _WorkspaceFilterValidationMixin:
     """
 
     def to_internal_value(self, data):
-        """Reject NUL bytes in string fields."""
-        for key, value in data.items():
-            if isinstance(value, str) and "\x00" in value:
-                raise serializers.ValidationError({key: f"The '{key}' field contains invalid characters."})
+        """Reject NUL bytes in string fields.
+
+        Guards with a Mapping check so non-object bodies (e.g. a list or
+        string) fall through to DRF's standard validation and return a
+        proper 400 instead of an ``AttributeError``.
+        """
+        if isinstance(data, Mapping):
+            for key, value in data.items():
+                if isinstance(value, str) and "\x00" in value:
+                    raise serializers.ValidationError({key: f"The '{key}' field contains invalid characters."})
         return super().to_internal_value(data)
 
     def validate_type(self, value: str | None) -> list[str] | None:

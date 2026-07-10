@@ -1964,8 +1964,8 @@
                       "type": "standard",
                       "name": "My first workspace",
                       "description": "This is a basic workspace.",
-                      "created": "2024-05-06T12:20-12-0700",
-                      "modified": "2024-05-06T12:20-12-0700"
+                      "created": "2024-05-06T12:20:00-07:00",
+                      "modified": "2024-05-06T12:20:00-07:00"
                     }
                   ]
                 }
@@ -2184,8 +2184,8 @@
                       "type": "standard",
                       "name": "My first workspace",
                       "description": "This is a basic workspace.",
-                      "created": "2024-05-06T12:20-12-0700",
-                      "modified": "2024-05-06T12:20-12-0700"
+                      "created": "2024-05-06T12:20:00-07:00",
+                      "modified": "2024-05-06T12:20:00-07:00"
                     }
                   ]
                 }
@@ -4414,6 +4414,7 @@
           },
           "type": {
             "type": "string",
+            "maxLength": 200,
             "description": "Filter by workspace type. Supports comma-separated values (e.g. standard,ungrouped-hosts). Defaults to standard when ids are provided without explicit type."
           },
           "name": {

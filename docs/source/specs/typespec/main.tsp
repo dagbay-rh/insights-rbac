@@ -525,8 +525,8 @@ namespace Workspaces {
               type: WorkspaceTypes.standard,
               name: "My first workspace",
               description: "This is a basic workspace.",
-              created: offsetDateTime.fromISO("2024-05-06T12:20-12-0700"),
-              modified: offsetDateTime.fromISO("2024-05-06T12:20-12-0700")
+              created: offsetDateTime.fromISO("2024-05-06T12:20:00-07:00"),
+              modified: offsetDateTime.fromISO("2024-05-06T12:20:00-07:00")
             }
           ]
         }
@@ -745,6 +745,7 @@ namespace Workspaces {
         ids: UUID[];
 
         @doc("Filter by workspace type. Supports comma-separated values (e.g. standard,ungrouped-hosts). Defaults to standard when ids are provided without explicit type.")
+        @maxLength(200)
         type?: string;
 
         @doc("Filter by workspace name. Case-insensitive substring match by default; use * for glob patterns.")
@@ -791,8 +792,8 @@ namespace Workspaces {
                     type: WorkspaceTypes.standard,
                     name: "My first workspace",
                     description: "This is a basic workspace.",
-                    created: offsetDateTime.fromISO("2024-05-06T12:20-12-0700"),
-                    modified: offsetDateTime.fromISO("2024-05-06T12:20-12-0700")
+                    created: offsetDateTime.fromISO("2024-05-06T12:20:00-07:00"),
+                    modified: offsetDateTime.fromISO("2024-05-06T12:20:00-07:00")
                 }
             ]
         }

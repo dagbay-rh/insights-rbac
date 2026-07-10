@@ -3835,7 +3835,7 @@ class WorkspaceTestsQuery(WorkspaceViewTests):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIsInstance(payload.get("data"), list)
-        self.assertGreaterEqual(payload["meta"]["count"], 1)
+        self.assertEqual(payload["meta"]["count"], 1)
 
     @patch("core.kafka.RBACProducer.send_kafka_message")
     def test_query_uses_read_not_write_permission(self, send_kafka_message):
