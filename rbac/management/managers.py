@@ -23,10 +23,10 @@ from typing import TYPE_CHECKING
 
 from django.db import DatabaseError, connection, models
 
-logger = logging.getLogger(__name__)
-
 if TYPE_CHECKING:
     from management.workspace.model import Workspace
+
+logger = logging.getLogger(__name__)
 
 
 class WorkspaceQuerySet(models.QuerySet):
