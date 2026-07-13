@@ -213,6 +213,10 @@ objects:
             value: ${DR_RELATIONS_RECONCILE_ENABLED}
           - name: DR_WORKSPACE_RECONCILE_ENABLED
             value: ${DR_WORKSPACE_RECONCILE_ENABLED}
+          - name: RBAC_KAFKA_CONSUMER_TOPIC
+            value: ${RBAC_KAFKA_CONSUMER_TOPIC}
+          - name: DR_KAFKA_CONSUMER_GROUP_ID
+            value: ${DR_KAFKA_CONSUMER_GROUP_ID}
           - name: CELERY_WORKER_CONCURRENCY
             value: ${CELERY_WORKER_CONCURRENCY}
           - name: NOTIFICATIONS_TOPIC
@@ -249,6 +253,8 @@ objects:
             value: ${REDHAT_SSO}
           - name: REPLICATION_TO_RELATION_ENABLED
             value: ${REPLICATION_TO_RELATION_ENABLED}
+          - name: EPH_ENV
+            value: ${EPH_ENV}
           - name: PRINCIPAL_CLEANUP_UPDATE_ENABLED_UMB
             value: ${PRINCIPAL_CLEANUP_UPDATE_ENABLED_UMB}
           - name: V2_MIGRATION_APP_EXCLUDE_LIST
@@ -561,6 +567,8 @@ objects:
             value: ${SA_NAME}
           - name: REPLICATION_TO_RELATION_ENABLED
             value: ${REPLICATION_TO_RELATION_ENABLED}
+          - name: EPH_ENV
+            value: ${EPH_ENV}
           - name: PRINCIPAL_CLEANUP_UPDATE_ENABLED_UMB
             value: ${PRINCIPAL_CLEANUP_UPDATE_ENABLED_UMB}
           - name: V2_MIGRATION_APP_EXCLUDE_LIST
@@ -669,6 +677,8 @@ objects:
             value: ${IT_BYPASS_PERMISSIONS_MODIFY_SERVICE_ACCOUNTS}
           - name: IT_BYPASS_TOKEN_VALIDATION
             value: ${IT_BYPASS_TOKEN_VALIDATION}
+          - name: IT_BYPASS_SYSTEM_USER_ID
+            value: ${IT_BYPASS_SYSTEM_USER_ID}
           - name: IT_SERVICE_BASE_PATH
             value: ${IT_SERVICE_BASE_PATH}
           - name: IT_SERVICE_HOST
@@ -779,6 +789,8 @@ objects:
             value: ${RBAC_KAFKA_CUSTOM_CONSUMER_BROKER}
           - name: REPLICATION_TO_RELATION_ENABLED
             value: ${REPLICATION_TO_RELATION_ENABLED}
+          - name: EPH_ENV
+            value: ${EPH_ENV}
           - name: RELATION_API_SERVER
             value: ${RELATION_API_SERVER}
           # Relations API variables
@@ -1419,7 +1431,7 @@ objects:
     name: system-users
   data:
     system-users.json: >-
-      ewogICAgImluc2VydF9zdWJfaGVyZSI6IHsKICAgICAgICAiYWRtaW4iOiB0cnVlLAogICAgICAgICJpc19zZXJ2aWNlX2FjY291bnQiOiB0cnVlLAogICAgICAgICJhbGxvd19hbnlfb3JnIjogdHJ1ZQogICAgfQp9Cg==
+      ewogICAgIm1vY2tlZC11c2VyLWlkLWJlY2F1c2UtdG9rZW4tdmFsaWRhdGlvbi1pcy1kaXNhYmxlZCI6IHsKICAgICAgICAiYWRtaW4iOiB0cnVlLAogICAgICAgICJpc19zZXJ2aWNlX2FjY291bnQiOiB0cnVlLAogICAgICAgICJhbGxvd19hbnlfb3JnIjogdHJ1ZQogICAgfQp9Cg==
   type: Opaque
 - apiVersion: v1
   kind: Secret
@@ -1726,6 +1738,12 @@ parameters:
 - description: Enable disaster recovery workspace recovery endpoint and Celery task
   name: DR_WORKSPACE_RECONCILE_ENABLED
   value: 'False'
+- description: Kafka consumer group ID for DR reconciliation reader
+  name: DR_KAFKA_CONSUMER_GROUP_ID
+  value: 'rbac-dr-consumer-group'
+- description: Comma-separated replication event types to skip during DR reconciliation (empty to skip none)
+  name: DR_SKIP_EVENT_TYPES
+  value: ''
 - name: EXTERNAL_SYNC_TOPIC
   value: 'platform.rbac.sync'
 - name: EXTERNAL_CHROME_TOPIC
@@ -1747,6 +1765,11 @@ parameters:
 - name: IT_BYPASS_TOKEN_VALIDATION
   description: Bypass validating the token that the user must provide in the Authorization header for making IT calls?
   value: 'False'
+- name: IT_BYPASS_SYSTEM_USER_ID
+  description: >
+    System user ID used when IT_BYPASS_TOKEN_VALIDATION is enabled.
+    Must match a key in the SYSTEM_USERS secret for s2s auth to succeed.
+  value: 'mocked-user-id-because-token-validation-is-disabled'
 - name: IT_SERVICE_BASE_PATH
   description: Path of the IT service's API
   value: '/auth/realms/redhat-external/apis'
@@ -1814,6 +1837,9 @@ parameters:
 - name: REPLICATION_TO_RELATION_ENABLED
   description: Enable replication to Relation API
   value: "True"
+- name: EPH_ENV
+  description: Flag indicating deployment is in an ephemeral environment
+  value: 'False'
 - name: MCP_ENABLED
   description: Flag to enable the MCP (Model Context Protocol) agent-to-service endpoint. Set to False to fully disable the MCP server.
   value: 'False'
