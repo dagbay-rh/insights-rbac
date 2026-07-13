@@ -16,7 +16,14 @@
 #
 """Model managers."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from django.db import connection, models
+
+if TYPE_CHECKING:
+    from management.workspace.model import Workspace
 
 
 class WorkspaceQuerySet(models.QuerySet):
@@ -56,8 +63,11 @@ class WorkspaceManager(models.Manager):
         """Attach the custom queryset."""
         return WorkspaceQuerySet(self.model, using=self._db)
 
-    def _get_cached_built_in_workspace(self, tenant, tenant_id, ws_type):
+    def _get_cached_built_in_workspace(self, tenant, tenant_id, ws_type: str) -> Workspace:
         """Fetch a built-in workspace, using the cache when an org_id is available.
+
+        Cache write failures are handled gracefully by BasicCache.save() (logged
+        and swallowed), so the DB result is always returned even if caching fails.
 
         :param tenant: Optional Tenant object.
         :param tenant_id: Optional tenant PK (int) or Tenant object.

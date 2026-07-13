@@ -414,11 +414,27 @@ class PrincipalCache(BasicCache):
 class WorkspaceCache(BasicCache):
     """Redis-based caching for immutable root and default workspaces.
 
-    Two key namespaces:
-    - Model cache: stores pickled Workspace instances (TTL: PRINCIPAL_CACHE_LIFETIME, 3600s)
-    - Response cache: stores serialized API responses (TTL: ACCESS_CACHE_LIFETIME, 600s)
+    Two cache layers with intentionally different TTLs and serialization:
+
+    Model cache (Layer 1):
+        - Stores pickled Workspace model instances for manager-level lookups
+          (``Workspace.objects.root()``, ``.default()``).
+        - TTL: ``PRINCIPAL_CACHE_LIFETIME`` (3600s) — longer because root/default
+          workspaces are per-tenant immutable singletons whose DB rows never change.
+        - Uses pickle (inherited from BasicCache contract shared with TenantCache,
+          AccessCache, PrincipalCache). A cross-cutting migration to JSON is tracked
+          separately.
+
+    Response cache (Layer 2):
+        - Stores JSON-serialized API responses for view-level caching
+          (``/v2/workspaces/?type=root``, retrieve by pk).
+        - TTL: ``ACCESS_CACHE_LIFETIME`` (600s) — shorter because serialized
+          responses depend on serializer code, so a code deploy with changed fields
+          should see fresh data sooner.
+        - Uses JSON (no model reconstruction needed, just pass-through to Response).
 
     Only caches built-in (root/default) workspaces which are per-tenant immutable singletons.
+    Invalidation via ``delete_workspaces_for_tenant()`` clears both layers.
     """
 
     def key_for(self, org_id: str, workspace_type: str) -> str:
