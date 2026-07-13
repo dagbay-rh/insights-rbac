@@ -513,20 +513,10 @@ class ReconcileAllResourceTypesTest(TestCase):
         self.assertEqual(len(log), 0)
 
 
-_ALL_SKIP_TYPES = [
-    "bootstrap_tenant",
-    "bulk_bootstrap_tenant",
-    "external_user_update",
-    "external_user_disable",
-    "bulk_external_user_update",
-]
-
-
-@override_settings(DR_SKIP_EVENT_TYPES=_ALL_SKIP_TYPES)
 class ReconcileSkippedEventTypesTest(TestCase):
-    """Verify that bootstrap and external user (UMB) events are skipped when configured.
+    """Verify that bootstrap and external user (UMB) events are skipped during DR.
 
-    These event types can be skipped via DR_SKIP_EVENT_TYPES setting:
+    These event types should not be processed through the corrective truth table:
     - bootstrap_tenant / bulk_bootstrap_tenant: bulk initialization events
     - external_user_update / external_user_disable / bulk_external_user_update: UMB-sourced user sync
     """
@@ -733,7 +723,7 @@ class ReconcileSkippedEventTypesTest(TestCase):
     @override_settings(DR_SKIP_EVENT_TYPES=[])
     @patch("management.disaster_recovery.service.read_events_in_window")
     def test_empty_skip_list_processes_all_events(self, mock_read):
-        """When DR_SKIP_EVENT_TYPES is empty (the default), all events are processed normally."""
+        """When DR_SKIP_EVENT_TYPES is empty, bootstrap events are processed normally."""
         fake_ws = str(uuid4())
 
         mock_read.return_value = [
