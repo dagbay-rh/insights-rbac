@@ -76,32 +76,55 @@ class CorrectiveEventStats(TypedDict):
 def parse_workspace_kafka_events(kafka_events: list[KafkaEvent]) -> list[WorkspaceKafkaEvent]:
     """Parse raw Kafka events into WorkspaceKafkaEvent dicts.
 
-    Filters to only workspace aggregate type events and deduplicates by workspace ID,
-    keeping only the latest event per workspace (chronological order by Kafka timestamp).
+    The Debezium outbox EventRouter SMT routes events to topic
+    ``outbox.event.{aggregatetype}`` and sets the Kafka message value to the
+    outbox ``payload`` column content.  So on topic ``outbox.event.workspace``
+    each message value IS the payload dict directly::
+
+        {"org_id": "…", "workspace": {…}, "operation": "create", …}
+
+    This function also supports the pre-SMT format where the full outbox row
+    is the message value (``aggregatetype`` + nested ``payload``), for
+    resilience if the connector configuration changes.
+
+    Deduplicates by workspace ID, keeping only the latest event per workspace.
     """
     workspace_events: dict[str, WorkspaceKafkaEvent] = {}
 
     for event in kafka_events:
         value = event.value
-        aggregate_type = value.get("aggregatetype", "")
-        if aggregate_type != AggregateTypes.WORKSPACE.value:
-            continue
 
-        payload = value.get("payload")
-        if not isinstance(payload, dict):
-            continue
+        if value.get("aggregatetype") == AggregateTypes.WORKSPACE.value:
+            payload = value.get("payload")
+            if not isinstance(payload, dict):
+                if isinstance(payload, str):
+                    try:
+                        import json
+
+                        payload = json.loads(payload)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                else:
+                    continue
+        else:
+            payload = value
 
         workspace_data = payload.get("workspace", {})
         workspace_id = workspace_data.get("id", "")
         if not workspace_id:
+            logger.debug("Skipping Kafka event at offset %d: missing workspace id", event.offset)
             continue
 
         operation = payload.get("operation", "")
         if operation not in ("create", "update", "delete"):
+            logger.debug("Skipping Kafka event at offset %d: unsupported operation '%s'", event.offset, operation)
             continue
 
         ws_type = workspace_data.get("type", "")
         if ws_type not in _PROCESSABLE_TYPE_VALUES:
+            logger.debug(
+                "Skipping Kafka event at offset %d: workspace type '%s' not processable", event.offset, ws_type
+            )
             continue
 
         parsed = WorkspaceKafkaEvent(
