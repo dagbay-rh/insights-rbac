@@ -513,10 +513,19 @@ class ReconcileAllResourceTypesTest(TestCase):
         self.assertEqual(len(log), 0)
 
 
+@override_settings(
+    DR_SKIP_EVENT_TYPES=[
+        "bootstrap_tenant",
+        "bulk_bootstrap_tenant",
+        "external_user_update",
+        "external_user_disable",
+        "bulk_external_user_update",
+    ]
+)
 class ReconcileSkippedEventTypesTest(TestCase):
-    """Verify that bootstrap and external user (UMB) events are skipped during DR.
+    """Verify that bootstrap and external user (UMB) events are skipped when configured.
 
-    These event types should not be processed through the corrective truth table:
+    These event types can be excluded via the DR_SKIP_EVENT_TYPES setting:
     - bootstrap_tenant / bulk_bootstrap_tenant: bulk initialization events
     - external_user_update / external_user_disable / bulk_external_user_update: UMB-sourced user sync
     """
