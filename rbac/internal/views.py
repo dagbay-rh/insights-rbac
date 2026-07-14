@@ -83,6 +83,7 @@ from management.principal.proxy import (
     USER_ENV_HEADER,
     bop_request_status_count,
     bop_request_time_tracking,
+    external_principal_to_user,
 )
 from management.relation_replicator.outbox_replicator import OutboxReplicator
 from management.relation_replicator.relation_replicator import PartitionKey, ReplicationEvent, ReplicationEventType
@@ -2990,3 +2991,150 @@ def kessel_parity_check(request):
         },
         status=202,
     )
+
+
+def bootstrap_users_from_user_ids(request):
+    """Bootstrap users by looking up user IDs in BOP and creating users/tenants.
+
+    POST /_private/api/utils/bootstrap_users_from_user_ids/?dry_run=true
+
+    Body: {"user_ids": ["12345", "67890"]}
+
+    Query params:
+        dry_run: When 'true', queries BOP and reports what would happen without
+                 actually creating users or bootstrapping tenants.
+
+    For each user ID:
+    1. Queries BOP to get user details (username, org_id, is_active, is_org_admin)
+    2. Skips users that are not active
+    3. Creates the user and bootstraps their tenant using the same flow as replicated events
+    """
+    if request.method != "POST":
+        return handle_error('Invalid method, only "POST" is allowed.', 405)
+
+    if not request.body:
+        return handle_error('Invalid request, must supply "user_ids" in body.', 400)
+
+    try:
+        body = json.loads(request.body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as err:
+        return handle_error(f"Invalid JSON in request body: {err}", 400)
+
+    user_ids = body.get("user_ids", [])
+    if not user_ids or not isinstance(user_ids, list):
+        return handle_error('Invalid request: "user_ids" must be a non-empty array.', 400)
+
+    dry_run = request.GET.get("dry_run", "false").lower() == "true"
+    user_ids = [str(uid) for uid in user_ids]
+
+    logger.info("Bootstrap users from user_ids requested. count=%d dry_run=%s", len(user_ids), dry_run)
+
+    resp = PROXY.request_filtered_principals(
+        user_ids,
+        org_id=None,
+        options={"query_by": "user_id", "return_id": True, "status": "enabled,disabled"},
+    )
+
+    if isinstance(resp, dict) and "errors" in resp:
+        bop_status = resp.get("status_code", 500)
+        logger.error("BOP error during bootstrap_users_from_user_ids: status=%s errors=%s", bop_status, resp["errors"])
+        return handle_error(f"Error querying BOP for user IDs: {resp['errors']}", 500)
+
+    bop_users = resp.get("data", [])
+    bop_user_by_id = {}
+    if isinstance(bop_users, dict):
+        bop_users = bop_users.get("users", [])
+    for bop_user in bop_users:
+        uid = bop_user.get("user_id") or bop_user.get("external_source_id")
+        if uid:
+            bop_user_by_id[str(uid)] = bop_user
+
+    results = []
+    bootstrap_service = V2TenantBootstrapService(OutboxReplicator())
+
+    for user_id in user_ids:
+        bop_user = bop_user_by_id.get(user_id)
+        if bop_user is None:
+            results.append({"user_id": user_id, "status": "not_found", "detail": "User not found in BOP"})
+            continue
+
+        user = external_principal_to_user(bop_user)
+        if not user.is_active:
+            results.append(
+                {
+                    "user_id": user_id,
+                    "status": "inactive",
+                    "detail": "User is not active in BOP",
+                    "username": user.username,
+                    "org_id": user.org_id,
+                }
+            )
+            continue
+
+        if not user.org_id:
+            results.append(
+                {
+                    "user_id": user_id,
+                    "status": "error",
+                    "detail": "User has no org_id in BOP",
+                    "username": user.username,
+                }
+            )
+            continue
+
+        if dry_run:
+            results.append(
+                {
+                    "user_id": user_id,
+                    "status": "would_bootstrap",
+                    "username": user.username,
+                    "org_id": user.org_id,
+                    "is_org_admin": user.admin,
+                }
+            )
+            continue
+
+        try:
+            with transaction.atomic():
+                bootstrapped = bootstrap_service.update_user(user, upsert=True, ready_tenant=True)
+            if bootstrapped is None:
+                results.append(
+                    {
+                        "user_id": user_id,
+                        "status": "inactive",
+                        "detail": "User became inactive during bootstrap",
+                        "username": user.username,
+                        "org_id": user.org_id,
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "user_id": user_id,
+                        "status": "bootstrapped",
+                        "username": user.username,
+                        "org_id": user.org_id,
+                        "tenant_ready": bootstrapped.tenant.ready,
+                    }
+                )
+        except Exception as err:
+            logger.exception("Error bootstrapping user_id=%s org_id=%s: %s", user_id, user.org_id, err)
+            results.append(
+                {
+                    "user_id": user_id,
+                    "status": "error",
+                    "detail": str(err),
+                    "username": user.username,
+                    "org_id": user.org_id,
+                }
+            )
+
+    bootstrapped_count = sum(1 for r in results if r["status"] == "bootstrapped")
+    logger.info(
+        "Bootstrap users from user_ids completed. total=%d bootstrapped=%d dry_run=%s",
+        len(user_ids),
+        bootstrapped_count,
+        dry_run,
+    )
+
+    return JsonResponse({"dry_run": dry_run, "results": results}, status=200)
