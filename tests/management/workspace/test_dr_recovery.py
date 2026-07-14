@@ -39,30 +39,42 @@ def _make_kafka_event(
     ws_name: str = "Test Workspace",
     ws_type: str = "standard",
     timestamp_ms: int = 1000000,
+    flat: bool = False,
 ) -> KafkaEvent:
-    """Build a KafkaEvent that mimics a Debezium workspace outbox message."""
+    """Build a KafkaEvent that mimics a Debezium workspace outbox message.
+
+    flat=False (default): pre-SMT format with aggregatetype + nested payload.
+    flat=True: EventRouter SMT format where the payload IS the message value.
+    """
+    payload = {
+        "org_id": org_id,
+        "account_number": account_number,
+        "operation": operation,
+        "workspace": {
+            "id": workspace_id,
+            "name": ws_name,
+            "type": ws_type,
+            "created": "2026-05-15T10:00:00Z",
+            "modified": "2026-05-15T10:00:00Z",
+        },
+    }
+
+    if flat:
+        value = payload
+    else:
+        value = {
+            "aggregatetype": AggregateTypes.WORKSPACE.value,
+            "aggregateid": "production",
+            "type": f"{operation}_workspace",
+            "payload": payload,
+        }
+
     return KafkaEvent(
         topic="outbox.event.workspace",
         partition=0,
         offset=0,
         timestamp_ms=timestamp_ms,
-        value={
-            "aggregatetype": AggregateTypes.WORKSPACE.value,
-            "aggregateid": "production",
-            "type": f"{operation}_workspace",
-            "payload": {
-                "org_id": org_id,
-                "account_number": account_number,
-                "operation": operation,
-                "workspace": {
-                    "id": workspace_id,
-                    "name": ws_name,
-                    "type": ws_type,
-                    "created": "2026-05-15T10:00:00Z",
-                    "modified": "2026-05-15T10:00:00Z",
-                },
-            },
-        },
+        value=value,
     )
 
 
@@ -135,6 +147,42 @@ class TestParseWorkspaceKafkaEvents(TestCase):
         """Empty event list returns empty result."""
         result = parse_workspace_kafka_events([])
         self.assertEqual(result, [])
+
+    def test_flat_event_router_format(self):
+        """EventRouter SMT format (flat payload) is parsed correctly."""
+        ws_id = str(uuid.uuid4())
+        event = _make_kafka_event(ws_id, "create", flat=True)
+        result = parse_workspace_kafka_events([event])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["workspace_id"], ws_id)
+        self.assertEqual(result[0]["operation"], "create")
+        self.assertEqual(result[0]["org_id"], "12345")
+
+    def test_flat_format_filters_system_types(self):
+        """EventRouter SMT format still filters root and ungrouped-hosts types."""
+        root_event = _make_kafka_event(str(uuid.uuid4()), "create", ws_type="root", flat=True)
+        ungrouped_event = _make_kafka_event(str(uuid.uuid4()), "create", ws_type="ungrouped-hosts", flat=True)
+        result = parse_workspace_kafka_events([root_event, ungrouped_event])
+        self.assertEqual(result, [])
+
+    def test_flat_format_deduplicates(self):
+        """EventRouter SMT format deduplicates by workspace ID."""
+        ws_id = str(uuid.uuid4())
+        create_event = _make_kafka_event(ws_id, "create", timestamp_ms=1000, flat=True)
+        update_event = _make_kafka_event(ws_id, "update", timestamp_ms=2000, flat=True)
+        result = parse_workspace_kafka_events([create_event, update_event])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["operation"], "update")
+
+    def test_mixed_flat_and_nested_formats(self):
+        """Both EventRouter (flat) and pre-SMT (nested) formats work together."""
+        ws_id_flat = str(uuid.uuid4())
+        ws_id_nested = str(uuid.uuid4())
+        flat_event = _make_kafka_event(ws_id_flat, "create", flat=True)
+        nested_event = _make_kafka_event(ws_id_nested, "delete", flat=False)
+        result = parse_workspace_kafka_events([flat_event, nested_event])
+        ws_ids = {e["workspace_id"] for e in result}
+        self.assertEqual(ws_ids, {ws_id_flat, ws_id_nested})
 
 
 class TestGenerateCorrectiveWorkspaceEvents(TestCase):
