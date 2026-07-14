@@ -3032,7 +3032,7 @@ def bootstrap_users_from_user_ids(request):
     resp = PROXY.request_filtered_principals(
         user_ids,
         org_id=None,
-        options={"query_by": "user_id", "return_id": True, "status": "enabled,disabled"},
+        options={"query_by": "user_id", "return_id": True, "status": "all"},
     )
 
     if isinstance(resp, dict) and "errors" in resp:
