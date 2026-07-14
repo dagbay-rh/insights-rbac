@@ -2996,9 +2996,13 @@ def kessel_parity_check(request):
 def bootstrap_users_from_user_ids(request):
     """Bootstrap users by looking up user IDs in BOP and creating users/tenants.
 
-    POST /_private/api/utils/bootstrap_users_from_user_ids/
+    POST /_private/api/utils/bootstrap_users_from_user_ids/?dry_run=true
 
     Body: {"user_ids": ["12345", "67890"]}
+
+    Query params:
+        dry_run: When 'true', queries BOP and reports what would happen without
+                 actually creating users or bootstrapping tenants.
 
     For each user ID:
     1. Queries BOP to get user details (username, org_id, is_active, is_org_admin)
@@ -3020,9 +3024,10 @@ def bootstrap_users_from_user_ids(request):
     if not user_ids or not isinstance(user_ids, list):
         return handle_error('Invalid request: "user_ids" must be a non-empty array.', 400)
 
+    dry_run = request.GET.get("dry_run", "false").lower() == "true"
     user_ids = [str(uid) for uid in user_ids]
 
-    logger.info("Bootstrap users from user_ids requested. count=%d", len(user_ids))
+    logger.info("Bootstrap users from user_ids requested. count=%d dry_run=%s", len(user_ids), dry_run)
 
     resp = PROXY.request_filtered_principals(
         user_ids,
@@ -3077,6 +3082,18 @@ def bootstrap_users_from_user_ids(request):
             )
             continue
 
+        if dry_run:
+            results.append(
+                {
+                    "user_id": user_id,
+                    "status": "would_bootstrap",
+                    "username": user.username,
+                    "org_id": user.org_id,
+                    "is_org_admin": user.admin,
+                }
+            )
+            continue
+
         try:
             with transaction.atomic():
                 bootstrapped = bootstrap_service.update_user(user, upsert=True, ready_tenant=True)
@@ -3114,9 +3131,10 @@ def bootstrap_users_from_user_ids(request):
 
     bootstrapped_count = sum(1 for r in results if r["status"] == "bootstrapped")
     logger.info(
-        "Bootstrap users from user_ids completed. total=%d bootstrapped=%d",
+        "Bootstrap users from user_ids completed. total=%d bootstrapped=%d dry_run=%s",
         len(user_ids),
         bootstrapped_count,
+        dry_run,
     )
 
-    return JsonResponse({"results": results}, status=200)
+    return JsonResponse({"dry_run": dry_run, "results": results}, status=200)
