@@ -560,8 +560,8 @@ def run_kessel_parity_checks_in_worker(org_ids=None):
                     if ws_missing_shown >= 20:
                         break
                     detail_lines.append(
-                        f"[PCH]       - MISSING: rbac/workspace:{r['parent_id']}"
-                        f"#parent@rbac/workspace:{r['workspace_id']}"
+                        f"[PCH]       - MISSING: rbac/workspace:{r['workspace_id']}"
+                        f"#parent@rbac/workspace:{r['parent_id']}"
                     )
                     ws_missing_shown += 1
                 if len(missing) > ws_missing_shown:
