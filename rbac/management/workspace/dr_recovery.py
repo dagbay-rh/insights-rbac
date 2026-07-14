@@ -90,6 +90,7 @@ def parse_workspace_kafka_events(kafka_events: list[KafkaEvent]) -> list[Workspa
     Deduplicates by workspace ID, keeping only the latest event per workspace.
     """
     workspace_events: dict[str, WorkspaceKafkaEvent] = {}
+    skipped_count = 0
 
     for event in kafka_events:
         value = event.value
@@ -112,7 +113,9 @@ def parse_workspace_kafka_events(kafka_events: list[KafkaEvent]) -> list[Workspa
         workspace_data = payload.get("workspace", {})
         workspace_id = workspace_data.get("id", "")
         if not workspace_id:
-            logger.debug("Skipping Kafka event at offset %d: missing workspace id", event.offset)
+            skipped_count += 1
+            if skipped_count == 1:
+                logger.info("First skipped event (missing workspace id), keys: %s", list(payload.keys())[:10])
             continue
 
         operation = payload.get("operation", "")
@@ -136,6 +139,9 @@ def parse_workspace_kafka_events(kafka_events: list[KafkaEvent]) -> list[Workspa
         )
 
         workspace_events[workspace_id] = parsed
+
+    if skipped_count and not workspace_events:
+        logger.info("All %d Kafka events were skipped during parsing (0 workspace events extracted)", skipped_count)
 
     return list(workspace_events.values())
 
