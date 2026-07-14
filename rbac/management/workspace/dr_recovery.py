@@ -73,49 +73,86 @@ class CorrectiveEventStats(TypedDict):
     error_details: list[dict[str, str]]
 
 
+def _extract_workspace_payload(value: dict) -> dict | None:
+    """Extract the workspace event payload from a Kafka message value.
+
+    Handles three Debezium message formats:
+
+    1. Pre-SMT (full outbox row)::
+
+        {"aggregatetype": "workspace", "payload": {…workspace payload…}}
+
+    2. EventRouter + JsonConverter (schema/payload envelope)::
+
+        {"schema": {…}, "payload": {…workspace payload…}}
+
+    3. EventRouter + flat (payload IS the value)::
+
+        {"org_id": "…", "workspace": {…}, "operation": "create"}
+
+    Returns the inner workspace payload dict, or None if unparseable.
+    """
+    import json as _json
+
+    # Format 1: pre-SMT — full outbox row with aggregatetype at top level
+    if value.get("aggregatetype") == AggregateTypes.WORKSPACE.value:
+        payload = value.get("payload")
+        if isinstance(payload, dict):
+            return payload
+        if isinstance(payload, str):
+            try:
+                return _json.loads(payload)
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    # Format 2: Kafka Connect JsonConverter envelope — {"schema": …, "payload": …}
+    if "schema" in value and "payload" in value:
+        payload = value["payload"]
+        if isinstance(payload, dict):
+            return payload
+        if isinstance(payload, str):
+            try:
+                return _json.loads(payload)
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    # Format 3: EventRouter flat — the value IS the payload
+    return value
+
+
 def parse_workspace_kafka_events(kafka_events: list[KafkaEvent]) -> list[WorkspaceKafkaEvent]:
     """Parse raw Kafka events into WorkspaceKafkaEvent dicts.
 
-    The Debezium outbox EventRouter SMT routes events to topic
-    ``outbox.event.{aggregatetype}`` and sets the Kafka message value to the
-    outbox ``payload`` column content.  So on topic ``outbox.event.workspace``
-    each message value IS the payload dict directly::
-
-        {"org_id": "…", "workspace": {…}, "operation": "create", …}
-
-    This function also supports the pre-SMT format where the full outbox row
-    is the message value (``aggregatetype`` + nested ``payload``), for
-    resilience if the connector configuration changes.
+    Supports all Debezium outbox message formats (pre-SMT, EventRouter with
+    JsonConverter envelope, and EventRouter flat).  See ``_extract_workspace_payload``
+    for format details.
 
     Deduplicates by workspace ID, keeping only the latest event per workspace.
     """
     workspace_events: dict[str, WorkspaceKafkaEvent] = {}
-    skipped_count = 0
+
+    if kafka_events:
+        first = kafka_events[0].value
+        logger.info("First Kafka event keys: %s", list(first.keys())[:10])
 
     for event in kafka_events:
         value = event.value
 
-        if value.get("aggregatetype") == AggregateTypes.WORKSPACE.value:
-            payload = value.get("payload")
-            if not isinstance(payload, dict):
-                if isinstance(payload, str):
-                    try:
-                        import json
-
-                        payload = json.loads(payload)
-                    except (json.JSONDecodeError, TypeError):
-                        continue
-                else:
-                    continue
-        else:
-            payload = value
+        payload = _extract_workspace_payload(value)
+        if payload is None:
+            logger.debug("Skipping Kafka event at offset %d: could not extract payload", event.offset)
+            continue
 
         workspace_data = payload.get("workspace", {})
         workspace_id = workspace_data.get("id", "")
         if not workspace_id:
-            skipped_count += 1
-            if skipped_count == 1:
-                logger.info("First skipped event (missing workspace id), keys: %s", list(payload.keys())[:10])
+            logger.debug(
+                "Skipping Kafka event at offset %d: missing workspace id, payload keys: %s",
+                event.offset,
+                list(payload.keys())[:10],
+            )
             continue
 
         operation = payload.get("operation", "")
@@ -139,9 +176,6 @@ def parse_workspace_kafka_events(kafka_events: list[KafkaEvent]) -> list[Workspa
         )
 
         workspace_events[workspace_id] = parsed
-
-    if skipped_count and not workspace_events:
-        logger.info("All %d Kafka events were skipped during parsing (0 workspace events extracted)", skipped_count)
 
     return list(workspace_events.values())
 

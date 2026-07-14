@@ -39,12 +39,13 @@ def _make_kafka_event(
     ws_name: str = "Test Workspace",
     ws_type: str = "standard",
     timestamp_ms: int = 1000000,
-    flat: bool = False,
+    fmt: str = "nested",
 ) -> KafkaEvent:
     """Build a KafkaEvent that mimics a Debezium workspace outbox message.
 
-    flat=False (default): pre-SMT format with aggregatetype + nested payload.
-    flat=True: EventRouter SMT format where the payload IS the message value.
+    fmt="nested" (default): pre-SMT format with aggregatetype + nested payload.
+    fmt="flat": EventRouter SMT format where the payload IS the message value.
+    fmt="envelope": Kafka Connect JsonConverter envelope with schema + payload.
     """
     payload = {
         "org_id": org_id,
@@ -59,8 +60,13 @@ def _make_kafka_event(
         },
     }
 
-    if flat:
+    if fmt == "flat":
         value = payload
+    elif fmt == "envelope":
+        value = {
+            "schema": {"type": "struct", "fields": []},
+            "payload": payload,
+        }
     else:
         value = {
             "aggregatetype": AggregateTypes.WORKSPACE.value,
@@ -151,7 +157,7 @@ class TestParseWorkspaceKafkaEvents(TestCase):
     def test_flat_event_router_format(self):
         """EventRouter SMT format (flat payload) is parsed correctly."""
         ws_id = str(uuid.uuid4())
-        event = _make_kafka_event(ws_id, "create", flat=True)
+        event = _make_kafka_event(ws_id, "create", fmt="flat")
         result = parse_workspace_kafka_events([event])
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["workspace_id"], ws_id)
@@ -160,29 +166,42 @@ class TestParseWorkspaceKafkaEvents(TestCase):
 
     def test_flat_format_filters_system_types(self):
         """EventRouter SMT format still filters root and ungrouped-hosts types."""
-        root_event = _make_kafka_event(str(uuid.uuid4()), "create", ws_type="root", flat=True)
-        ungrouped_event = _make_kafka_event(str(uuid.uuid4()), "create", ws_type="ungrouped-hosts", flat=True)
+        root_event = _make_kafka_event(str(uuid.uuid4()), "create", ws_type="root", fmt="flat")
+        ungrouped_event = _make_kafka_event(str(uuid.uuid4()), "create", ws_type="ungrouped-hosts", fmt="flat")
         result = parse_workspace_kafka_events([root_event, ungrouped_event])
         self.assertEqual(result, [])
 
     def test_flat_format_deduplicates(self):
         """EventRouter SMT format deduplicates by workspace ID."""
         ws_id = str(uuid.uuid4())
-        create_event = _make_kafka_event(ws_id, "create", timestamp_ms=1000, flat=True)
-        update_event = _make_kafka_event(ws_id, "update", timestamp_ms=2000, flat=True)
+        create_event = _make_kafka_event(ws_id, "create", timestamp_ms=1000, fmt="flat")
+        update_event = _make_kafka_event(ws_id, "update", timestamp_ms=2000, fmt="flat")
         result = parse_workspace_kafka_events([create_event, update_event])
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["operation"], "update")
 
-    def test_mixed_flat_and_nested_formats(self):
-        """Both EventRouter (flat) and pre-SMT (nested) formats work together."""
-        ws_id_flat = str(uuid.uuid4())
+    def test_json_converter_envelope_format(self):
+        """Kafka Connect JsonConverter envelope (schema + payload) is parsed correctly."""
+        ws_id = str(uuid.uuid4())
+        event = _make_kafka_event(ws_id, "update", fmt="envelope")
+        result = parse_workspace_kafka_events([event])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["workspace_id"], ws_id)
+        self.assertEqual(result[0]["operation"], "update")
+
+    def test_mixed_all_formats(self):
+        """All three formats (nested, flat, envelope) work together."""
         ws_id_nested = str(uuid.uuid4())
-        flat_event = _make_kafka_event(ws_id_flat, "create", flat=True)
-        nested_event = _make_kafka_event(ws_id_nested, "delete", flat=False)
-        result = parse_workspace_kafka_events([flat_event, nested_event])
+        ws_id_flat = str(uuid.uuid4())
+        ws_id_envelope = str(uuid.uuid4())
+        events = [
+            _make_kafka_event(ws_id_nested, "delete", fmt="nested"),
+            _make_kafka_event(ws_id_flat, "create", fmt="flat"),
+            _make_kafka_event(ws_id_envelope, "update", fmt="envelope"),
+        ]
+        result = parse_workspace_kafka_events(events)
         ws_ids = {e["workspace_id"] for e in result}
-        self.assertEqual(ws_ids, {ws_id_flat, ws_id_nested})
+        self.assertEqual(ws_ids, {ws_id_nested, ws_id_flat, ws_id_envelope})
 
 
 class TestGenerateCorrectiveWorkspaceEvents(TestCase):
