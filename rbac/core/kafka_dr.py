@@ -31,6 +31,26 @@ logger = logging.getLogger(__name__)
 DR_CONSUMER_GROUP = "rbac-dr-recovery"
 
 
+def _unwrap_schema_envelope(value: dict[str, Any]) -> dict[str, Any] | Any:
+    """Unwrap Kafka JsonConverter schema envelope if present.
+
+    When Kafka Connect uses JsonConverter with schemas.enable=true and
+    Debezium's table.expand.json.payload=false, the message looks like:
+        {"schema": {...}, "payload": "<json-string>"}
+    This extracts and parses the inner payload.
+    """
+    if "schema" in value and "payload" in value and len(value) == 2:
+        inner = value["payload"]
+        if isinstance(inner, str):
+            try:
+                return json.loads(inner)
+            except (json.JSONDecodeError, TypeError):
+                return value
+        if isinstance(inner, dict):
+            return inner
+    return value
+
+
 @dataclass
 class KafkaEvent:
     """A Kafka event with its timestamp and parsed value."""
@@ -54,7 +74,16 @@ def _create_consumer(group_id: str = DR_CONSUMER_GROUP) -> KafkaConsumer:
 
     kafka_auth = getattr(settings, "KAFKA_AUTH", None)
     if kafka_auth:
-        kwargs.update(kafka_auth)
+        for key in (
+            "bootstrap_servers",
+            "sasl_plain_username",
+            "sasl_plain_password",
+            "sasl_mechanism",
+            "security_protocol",
+            "ssl_cafile",
+        ):
+            if key in kafka_auth:
+                kwargs[key] = kafka_auth[key]
     elif getattr(settings, "KAFKA_SERVERS", None):
         kwargs["bootstrap_servers"] = settings.KAFKA_SERVERS
     else:
@@ -149,6 +178,10 @@ def read_events_by_timestamp(
 
             try:
                 value = message.value
+                if not isinstance(value, dict):
+                    continue
+
+                value = _unwrap_schema_envelope(value)
                 if not isinstance(value, dict):
                     continue
 
