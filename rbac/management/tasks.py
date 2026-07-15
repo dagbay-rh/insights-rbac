@@ -736,7 +736,7 @@ def recover_workspace_events_in_worker(
 
         buffer_delta = datetime.timedelta(minutes=buffer_minutes)
         start_dt = restore_dt - buffer_delta
-        end_dt = datetime.datetime.now(datetime.timezone.utc)
+        end_dt = restore_dt
 
         start_ms = int(start_dt.timestamp() * 1000)
         end_ms = int(end_dt.timestamp() * 1000)
