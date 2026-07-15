@@ -107,7 +107,7 @@ def read_events_by_timestamp(
         for tp in topic_partitions:
             offset_info = start_offsets.get(tp)
             if offset_info is None:
-                consumer.pause([tp])
+                consumer.pause(tp)
                 continue
             consumer.seek(tp, offset_info.offset)
             active_partitions.append(tp)
@@ -131,7 +131,7 @@ def read_events_by_timestamp(
             end_offset = partition_end_offsets.get(tp)
             if end_offset is not None and message.offset >= end_offset:
                 finished_partitions.add(tp)
-                consumer.pause([tp])
+                consumer.pause(tp)
                 if len(finished_partitions) == len(active_partitions):
                     break
                 continue
@@ -139,7 +139,7 @@ def read_events_by_timestamp(
             if message.timestamp > end_timestamp_ms:
                 if tp not in partition_end_offsets:
                     finished_partitions.add(tp)
-                    consumer.pause([tp])
+                    consumer.pause(tp)
                     if len(finished_partitions) == len(active_partitions):
                         break
                 continue
