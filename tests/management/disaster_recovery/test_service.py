@@ -23,17 +23,34 @@ from management.tenant_mapping.model import TenantMapping
 from management.workspace.model import Workspace
 
 
-def _make_tuple(resource_type="workspace", resource_id="ws-123"):
+def _make_tuple(resource_type="workspace", resource_id=None):
     return RelationTuple(
         resource=ObjectReference(
             type=ObjectType(namespace="rbac", name=resource_type),
-            id=resource_id,
+            id=resource_id or str(uuid4()),
         ),
         relation="parent",
         subject=SubjectReference(
             subject=ObjectReference(
                 type=ObjectType(namespace="rbac", name="workspace"),
-                id="ws-parent",
+                id=str(uuid4()),
+            ),
+        ),
+    )
+
+
+def _make_principal_tuple(group_id=None, user_id="uid-123"):
+    """Create a group membership tuple: group --member--> principal."""
+    return RelationTuple(
+        resource=ObjectReference(
+            type=ObjectType(namespace="rbac", name="group"),
+            id=group_id or str(uuid4()),
+        ),
+        relation="member",
+        subject=SubjectReference(
+            subject=ObjectReference(
+                type=ObjectType(namespace="rbac", name="principal"),
+                id=f"localhost/{user_id}",
             ),
         ),
     )
@@ -176,6 +193,7 @@ class ReconcileServiceTest(TestCase):
         self.assertEqual(result["time_window"]["end_ms"], 2000000)
         self.assertIn("events_read", result)
         self.assertIn("events_skipped_by_type", result)
+        self.assertIn("affected_user_ids", result)
         self.assertIn("tuples_processed", result)
         self.assertIn("duration_seconds", result)
 
@@ -495,10 +513,19 @@ class ReconcileAllResourceTypesTest(TestCase):
         self.assertEqual(len(log), 0)
 
 
+@override_settings(
+    DR_SKIP_EVENT_TYPES=[
+        "bootstrap_tenant",
+        "bulk_bootstrap_tenant",
+        "external_user_update",
+        "external_user_disable",
+        "bulk_external_user_update",
+    ]
+)
 class ReconcileSkippedEventTypesTest(TestCase):
-    """Verify that bootstrap and external user (UMB) events are skipped during DR.
+    """Verify that bootstrap and external user (UMB) events are skipped when configured.
 
-    These event types should not be processed through the corrective truth table:
+    These event types can be excluded via the DR_SKIP_EVENT_TYPES setting:
     - bootstrap_tenant / bulk_bootstrap_tenant: bulk initialization events
     - external_user_update / external_user_disable / bulk_external_user_update: UMB-sourced user sync
     """
@@ -896,3 +923,145 @@ class ReconcileMultiEventTest(TestCase):
         self.assertEqual(result["skipped"], 2)
         self.assertEqual(len(log), 0)
         ws.delete()
+
+
+class ReconcileAffectedUserIdsTest(TestCase):
+    """Verify that user_ids are extracted and logged from user-related events."""
+
+    @patch("management.disaster_recovery.service.read_events_in_window")
+    def test_user_ids_extracted_from_external_user_update(self, mock_read):
+        """User IDs from external_user_update events appear in affected_user_ids."""
+        mock_read.return_value = [
+            ParsedReplicationEvent(
+                offset=0,
+                partition=0,
+                timestamp_ms=1000,
+                event_type="external_user_update",
+                org_id="org-1",
+                relations_to_add=[_make_principal_tuple(user_id="user-100")],
+                relations_to_remove=[],
+            ),
+        ]
+
+        log = InMemoryLog()
+        result = reconcile(restore_timestamp_ms=1000000, replicator=OutboxReplicator(log=log))
+
+        self.assertEqual(result["affected_user_ids"], ["user-100"])
+
+    @patch("management.disaster_recovery.service.read_events_in_window")
+    def test_user_ids_extracted_from_disable_event(self, mock_read):
+        """User IDs from external_user_disable events appear in affected_user_ids."""
+        mock_read.return_value = [
+            ParsedReplicationEvent(
+                offset=0,
+                partition=0,
+                timestamp_ms=1000,
+                event_type="external_user_disable",
+                org_id="org-1",
+                relations_to_add=[],
+                relations_to_remove=[_make_principal_tuple(user_id="user-200")],
+            ),
+        ]
+
+        log = InMemoryLog()
+        result = reconcile(restore_timestamp_ms=1000000, replicator=OutboxReplicator(log=log))
+
+        self.assertEqual(result["affected_user_ids"], ["user-200"])
+
+    @patch("management.disaster_recovery.service.read_events_in_window")
+    def test_user_ids_deduplicated_across_events(self, mock_read):
+        """Same user_id in multiple events is reported only once."""
+        mock_read.return_value = [
+            ParsedReplicationEvent(
+                offset=0,
+                partition=0,
+                timestamp_ms=1000,
+                event_type="external_user_update",
+                org_id="org-1",
+                relations_to_add=[
+                    _make_principal_tuple(user_id="user-300"),
+                    _make_principal_tuple(user_id="user-300"),
+                ],
+                relations_to_remove=[],
+            ),
+            ParsedReplicationEvent(
+                offset=1,
+                partition=0,
+                timestamp_ms=1100,
+                event_type="external_user_update",
+                org_id="org-1",
+                relations_to_add=[_make_principal_tuple(user_id="user-400")],
+                relations_to_remove=[],
+            ),
+        ]
+
+        log = InMemoryLog()
+        result = reconcile(restore_timestamp_ms=1000000, replicator=OutboxReplicator(log=log))
+
+        self.assertEqual(result["affected_user_ids"], ["user-300", "user-400"])
+
+    @patch("management.disaster_recovery.service.read_events_in_window")
+    def test_non_user_events_do_not_contribute_user_ids(self, mock_read):
+        """Non-user events (workspace, group) don't produce affected_user_ids."""
+        mock_read.return_value = [
+            ParsedReplicationEvent(
+                offset=0,
+                partition=0,
+                timestamp_ms=1000,
+                event_type="create_workspace",
+                relations_to_add=[_make_tuple()],
+                relations_to_remove=[],
+            ),
+        ]
+
+        log = InMemoryLog()
+        result = reconcile(restore_timestamp_ms=1000000, replicator=OutboxReplicator(log=log))
+
+        self.assertEqual(result["affected_user_ids"], [])
+
+    @patch("management.disaster_recovery.service.read_events_in_window")
+    def test_bulk_external_user_update_extracts_user_ids(self, mock_read):
+        """User IDs from bulk_external_user_update events are extracted."""
+        mock_read.return_value = [
+            ParsedReplicationEvent(
+                offset=0,
+                partition=0,
+                timestamp_ms=1000,
+                event_type="bulk_external_user_update",
+                org_id="org-1",
+                relations_to_add=[
+                    _make_principal_tuple(user_id="user-500"),
+                    _make_principal_tuple(user_id="user-600"),
+                    _make_principal_tuple(user_id="user-700"),
+                ],
+                relations_to_remove=[],
+            ),
+        ]
+
+        log = InMemoryLog()
+        result = reconcile(restore_timestamp_ms=1000000, replicator=OutboxReplicator(log=log))
+
+        self.assertEqual(result["affected_user_ids"], ["user-500", "user-600", "user-700"])
+
+    @patch("management.disaster_recovery.service.read_events_in_window")
+    def test_user_ids_extracted_even_when_events_are_skipped(self, mock_read):
+        """User IDs are extracted from all_events before skip filtering."""
+        mock_read.return_value = [
+            ParsedReplicationEvent(
+                offset=0,
+                partition=0,
+                timestamp_ms=1000,
+                event_type="external_user_update",
+                org_id="org-1",
+                relations_to_add=[_make_principal_tuple(user_id="user-800")],
+                relations_to_remove=[],
+            ),
+        ]
+
+        log = InMemoryLog()
+        with self.settings(DR_SKIP_EVENT_TYPES=["external_user_update"]):
+            result = reconcile(restore_timestamp_ms=1000000, replicator=OutboxReplicator(log=log))
+
+        self.assertEqual(result["affected_user_ids"], ["user-800"])
+        self.assertEqual(result["events_skipped_by_type"], 1)
+        self.assertEqual(result["events_read"], 0)

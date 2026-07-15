@@ -8,11 +8,34 @@ from management.disaster_recovery.corrective_writer import (
     generate_corrective_actions,
     write_corrective_events,
 )
-from management.disaster_recovery.kafka_reader import read_events_in_window
+from management.disaster_recovery.kafka_reader import ParsedReplicationEvent, read_events_in_window
 from management.disaster_recovery.resource_checker import check_resources_exist
 from management.relation_replicator.outbox_replicator import OutboxReplicator
 
 logger = logging.getLogger(__name__)
+
+_USER_EVENT_TYPES = frozenset(
+    {
+        "external_user_update",
+        "external_user_disable",
+        "bulk_external_user_update",
+    }
+)
+
+
+def _extract_user_ids(events: list[ParsedReplicationEvent]) -> set[str]:
+    """Extract unique user_ids from principal references in user-related events."""
+    user_ids: set[str] = set()
+    for event in events:
+        if event.event_type not in _USER_EVENT_TYPES:
+            continue
+        for rel in event.relations_to_add + event.relations_to_remove:
+            if rel.subject.subject.type.name == "principal":
+                resource_id = rel.subject.subject.id
+                parts = resource_id.rsplit("/", 1)
+                user_id = parts[-1] if len(parts) > 1 else resource_id
+                user_ids.add(user_id)
+    return user_ids
 
 
 def reconcile(
@@ -49,6 +72,14 @@ def reconcile(
 
     all_events = read_events_in_window(start_timestamp_ms, end_timestamp_ms)
 
+    affected_user_ids = _extract_user_ids(all_events)
+    if affected_user_ids:
+        logger.info(
+            "DR window contains %d unique user_id(s) from user events: %s",
+            len(affected_user_ids),
+            ", ".join(sorted(affected_user_ids)),
+        )
+
     skip_event_types = frozenset(settings.DR_SKIP_EVENT_TYPES)
     skipped_by_type = [e for e in all_events if e.event_type in skip_event_types]
     events = [e for e in all_events if e.event_type not in skip_event_types]
@@ -67,6 +98,7 @@ def reconcile(
             "time_window": {"start_ms": start_timestamp_ms, "end_ms": end_timestamp_ms},
             "events_read": 0,
             "events_skipped_by_type": len(skipped_by_type),
+            "affected_user_ids": sorted(affected_user_ids),
             "tuples_processed": 0,
             "corrective_adds": 0,
             "corrective_removes": 0,
@@ -117,6 +149,7 @@ def reconcile(
             "time_window": {"start_ms": start_timestamp_ms, "end_ms": end_timestamp_ms},
             "events_read": len(events),
             "events_skipped_by_type": len(skipped_by_type),
+            "affected_user_ids": sorted(affected_user_ids),
             "tuples_processed": len(all_tuples),
             "corrective_adds": len(adds),
             "corrective_removes": len(removes),
@@ -148,6 +181,7 @@ def reconcile(
         "time_window": {"start_ms": start_timestamp_ms, "end_ms": end_timestamp_ms},
         "events_read": len(events),
         "events_skipped_by_type": len(skipped_by_type),
+        "affected_user_ids": sorted(affected_user_ids),
         "tuples_processed": len(all_tuples),
         "duration_seconds": elapsed,
     }

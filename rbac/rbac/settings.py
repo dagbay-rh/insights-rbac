@@ -711,7 +711,7 @@ DR_SKIP_EVENT_TYPES = [
     t.strip()
     for t in ENVIRONMENT.get_value(
         "DR_SKIP_EVENT_TYPES",
-        default="bootstrap_tenant,bulk_bootstrap_tenant,external_user_update,external_user_disable,bulk_external_user_update",
+        default="",
     ).split(",")
     if t.strip()
 ]

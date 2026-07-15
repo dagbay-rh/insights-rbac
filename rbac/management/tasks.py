@@ -560,8 +560,8 @@ def run_kessel_parity_checks_in_worker(org_ids=None):
                     if ws_missing_shown >= 20:
                         break
                     detail_lines.append(
-                        f"[PCH]       - MISSING: rbac/workspace:{r['parent_id']}"
-                        f"#parent@rbac/workspace:{r['workspace_id']}"
+                        f"[PCH]       - MISSING: rbac/workspace:{r['workspace_id']}"
+                        f"#parent@rbac/workspace:{r['parent_id']}"
                     )
                     ws_missing_shown += 1
                 if len(missing) > ws_missing_shown:
@@ -736,7 +736,7 @@ def recover_workspace_events_in_worker(
 
         buffer_delta = datetime.timedelta(minutes=buffer_minutes)
         start_dt = restore_dt - buffer_delta
-        end_dt = datetime.datetime.now(datetime.timezone.utc)
+        end_dt = restore_dt
 
         start_ms = int(start_dt.timestamp() * 1000)
         end_ms = int(end_dt.timestamp() * 1000)
