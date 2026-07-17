@@ -48,6 +48,11 @@ class TestLoggingHandlerDeduplication(SimpleTestCase):
         result = _parse_logging_handlers("console, ecs")
         self.assertEqual(result, ["console"])
 
+    def test_watchtower_only_unchanged(self):
+        """DJANGO_LOG_HANDLERS=watchtower should pass through unchanged."""
+        result = _parse_logging_handlers("watchtower")
+        self.assertEqual(result, ["watchtower"])
+
     def test_whitespace_only_entries_dropped(self):
         """Empty/whitespace-only entries from trailing commas are dropped."""
         result = _parse_logging_handlers("console,,ecs, ")
@@ -71,6 +76,36 @@ class TestLoggingHandlerDeduplication(SimpleTestCase):
                 f"Logger '{logger_name}' should not have 'ecs' when 'console' is also configured",
             )
             self.assertIn("console", handlers, f"Logger '{logger_name}' should have 'console' handler")
+
+
+class TestWatchtowerFormatterConfig(SimpleTestCase):
+    """Verify that the watchtower handler always uses ecs_formatter for CloudWatch."""
+
+    @mock.patch("boto3.client")
+    @mock.patch.dict(
+        os.environ,
+        {
+            "DJANGO_LOG_FORMATTER": "simple",
+            "CW_AWS_ACCESS_KEY_ID": "test-key",
+            "CW_AWS_SECRET_ACCESS_KEY": "test-secret",
+            "CW_AWS_REGION": "us-east-1",
+            "CW_LOG_GROUP": "test-group",
+            "CW_CREATE_LOG_GROUP": "True",
+        },
+    )
+    def test_watchtower_uses_ecs_formatter_regardless_of_log_formatter(self, mock_boto):
+        """Watchtower handler always uses ecs_formatter even when DJANGO_LOG_FORMATTER=simple."""
+        import rbac.settings as settings_module
+
+        importlib.reload(settings_module)
+        self.addCleanup(importlib.reload, settings_module)
+
+        self.assertIn("watchtower", settings_module.LOGGING["handlers"])
+        self.assertEqual(
+            settings_module.LOGGING["handlers"]["watchtower"]["formatter"],
+            "ecs_formatter",
+            "CloudWatch watchtower handler must always use ecs_formatter, not the env-controlled LOGGING_FORMATTER",
+        )
 
 
 class TestLoggerPropagationConfig(SimpleTestCase):

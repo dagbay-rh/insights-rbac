@@ -329,6 +329,9 @@ if CW_AWS_ACCESS_KEY_ID:
         aws_secret_access_key=CW_AWS_SECRET_ACCESS_KEY,
     )
 
+    # Formatter is hardcoded to ecs_formatter so CloudWatch always receives
+    # structured JSON, regardless of the DJANGO_LOG_FORMATTER env var which
+    # only controls the stdout/console handler format.
     WATCHTOWER_HANDLER = {
         "level": RBAC_LOGGING_LEVEL,
         "class": "watchtower.CloudWatchLogHandler",
