@@ -1533,7 +1533,7 @@ objects:
             processing is failing silently.
       - alert: RBACKafkaConsumerDown
         expr: >
-          min(rbac_kafka_consumer_info) == 0
+          min by (topic, group_id) (rbac_kafka_consumer_info) == 0
           or absent(rbac_kafka_consumer_info)
         for: 5m
         labels:
@@ -1592,6 +1592,9 @@ objects:
             The rate of replication events being produced exceeds the rate of
             successful consumer processing for over 10 minutes. The consumer
             is falling behind, which will increase end-to-end replication latency.
+            Note: this metric spans web-worker pods (relations_replication_event_total)
+            and consumer pods (rbac_kafka_consumer_messages_processed_total); both
+            must be scraped by the same Prometheus instance for the alert to function.
 
 parameters:
 - description: Image name

@@ -2140,13 +2140,37 @@ class HeartbeatMetricTests(TestCase):
         self.assertGreaterEqual(metric_value, before)
         self.assertLessEqual(metric_value, after)
 
-    def test_last_poll_time_gauge_exists(self):
-        """Test that the last_poll_time Gauge metric is properly defined."""
-        # Verify metric can be set without error
-        last_poll_time.set(1234567890.0)
-        self.assertEqual(last_poll_time._value.get(), 1234567890.0)
+    @override_settings(RBAC_KAFKA_CONSUMER_TOPIC="test-topic")
+    def test_health_check_updates_last_poll_time(self):
+        """Test that a successful health check updates last_poll_time even without messages."""
+        import time
 
-    def test_last_message_processed_time_gauge_exists(self):
-        """Test that the last_message_processed_time Gauge metric is properly defined."""
-        last_message_processed_time.set(1234567890.0)
-        self.assertEqual(last_message_processed_time._value.get(), 1234567890.0)
+        last_poll_time.set(0)
+        self.consumer.is_consuming = True
+        self.consumer.topic = "test-topic"
+        self.consumer.consumer.partitions_for_topic.return_value = {0}
+        self.consumer.liveness_file = Mock()
+        self.consumer.readiness_file = Mock()
+
+        before = time.time()
+        self.consumer._health_check_loop_iteration()
+        after = time.time()
+
+        metric_value = last_poll_time._value.get()
+        self.assertGreaterEqual(metric_value, before)
+        self.assertLessEqual(metric_value, after)
+
+    @override_settings(RBAC_KAFKA_CONSUMER_TOPIC="test-topic")
+    def test_health_check_failure_does_not_update_last_poll_time(self):
+        """Test that a failed health check does not update last_poll_time."""
+        last_poll_time.set(42.0)
+        self.consumer.is_consuming = True
+        self.consumer.topic = "test-topic"
+        self.consumer.consumer.partitions_for_topic.side_effect = Exception("Kafka unreachable")
+        self.consumer.liveness_file = Mock()
+        self.consumer.readiness_file = Mock()
+        self.consumer.readiness_file.exists.return_value = True
+
+        self.consumer._health_check_loop_iteration()
+
+        self.assertEqual(last_poll_time._value.get(), 42.0)
