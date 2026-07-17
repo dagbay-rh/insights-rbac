@@ -474,6 +474,8 @@ class GroupViewSet(
                 role_binding_service = RoleBindingService(tenant=group_tenant)
                 role_binding_service.restore_user_default_bindings()
 
+        # Notification is a non-DB side-effect, so it stays outside the transaction
+        # to avoid sending notifications that could be rolled back.
         if response.status_code == status.HTTP_204_NO_CONTENT:
             group_obj_change_notification_handler(request.user, group, "deleted")
         return response
