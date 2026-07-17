@@ -2133,8 +2133,14 @@ class HeartbeatMetricTests(TestCase):
 
         before = time.time()
         message_value = json.loads(message.value.decode("utf-8"))
-        self.consumer._process_and_commit_message(message, message_value, tp, {})
+        result = self.consumer._process_and_commit_message(message, message_value, tp, {})
         after = time.time()
+
+        # Assert processing succeeded
+        self.assertTrue(result)
+
+        # Assert offset was stored
+        self.consumer.offset_manager.store.assert_called_once_with(tp, message.offset, message.leader_epoch)
 
         metric_value = last_message_processed_time._value.get()
         self.assertGreaterEqual(metric_value, before)
@@ -2160,6 +2166,10 @@ class HeartbeatMetricTests(TestCase):
         self.assertGreaterEqual(metric_value, before)
         self.assertLessEqual(metric_value, after)
 
+        # Assert health status files were updated
+        self.consumer.liveness_file.touch.assert_called_once()
+        self.consumer.readiness_file.touch.assert_called_once()
+
     @override_settings(RBAC_KAFKA_CONSUMER_TOPIC="test-topic")
     def test_health_check_failure_does_not_update_last_poll_time(self):
         """Test that a failed health check does not update last_poll_time."""
@@ -2174,3 +2184,37 @@ class HeartbeatMetricTests(TestCase):
         self.consumer._health_check_loop_iteration()
 
         self.assertEqual(last_poll_time._value.get(), 42.0)
+
+        # Assert liveness kept but readiness removed on failure
+        self.consumer.liveness_file.touch.assert_called_once()
+        self.consumer.readiness_file.exists.assert_called_once()
+        self.consumer.readiness_file.unlink.assert_called_once()
+
+    @override_settings(RBAC_KAFKA_CONSUMER_TOPIC="test-topic")
+    def test_tombstone_updates_last_message_processed_time(self):
+        """Test that tombstone messages update last_message_processed_time."""
+        import time
+
+        last_message_processed_time.set(0)
+
+        message = Mock()
+        message.partition = 0
+        message.offset = 5
+        message.value = None
+        message.leader_epoch = 0
+
+        tp = Mock()
+
+        before = time.time()
+        result = self.consumer._handle_tombstone_message(message, tp)
+        after = time.time()
+
+        self.assertTrue(result)
+
+        # Assert offset was stored
+        self.consumer.offset_manager.store.assert_called_once_with(tp, message.offset, message.leader_epoch)
+
+        # Assert heartbeat metric was updated
+        metric_value = last_message_processed_time._value.get()
+        self.assertGreaterEqual(metric_value, before)
+        self.assertLessEqual(metric_value, after)

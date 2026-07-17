@@ -1577,6 +1577,11 @@ class RBACKafkaConsumer:
         self.offset_manager.store(topic_partition, message.offset, message.leader_epoch)
         if self.offset_manager.should_commit(message.offset):
             self.offset_manager.commit()  # Don't need to check return value here
+
+        # Update activity timestamp and heartbeat metric for tombstones too,
+        # so the consumer doesn't appear inactive when processing tombstones.
+        self.last_activity = time.time()
+        last_message_processed_time.set(self.last_activity)
         return True
 
     def _parse_message_value(self, message):
