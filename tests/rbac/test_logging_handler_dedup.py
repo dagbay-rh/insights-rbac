@@ -60,6 +60,7 @@ class TestLoggingHandlerDeduplication(SimpleTestCase):
         import rbac.settings as settings_module
 
         importlib.reload(settings_module)
+        self.addCleanup(importlib.reload, settings_module)
 
         # All application loggers should use the deduplicated handlers
         for logger_name in ("rbac", "api", "management", "internal", "django"):
