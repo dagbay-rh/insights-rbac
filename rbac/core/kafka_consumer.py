@@ -152,6 +152,22 @@ consistency_token_save_total = Counter(
     ["status"],  # success, lock_timeout, error
 )
 
+# Heartbeat metric: tracks when the consumer last successfully processed a message.
+# Use for alerting on consumer inactivity:
+#   time() - rbac_kafka_consumer_last_message_processed_timestamp_seconds > 900
+last_message_processed_time = Gauge(
+    "rbac_kafka_consumer_last_message_processed_timestamp_seconds",
+    "Unix timestamp of the last successfully processed message",
+)
+
+# Tracks the consumer's poll activity even when no messages are available.
+# Distinguishes "consumer is polling but topic is idle" from "consumer is stuck".
+#   time() - rbac_kafka_consumer_last_poll_timestamp_seconds > 120
+last_poll_time = Gauge(
+    "rbac_kafka_consumer_last_poll_timestamp_seconds",
+    "Unix timestamp of the last successful Kafka poll (with or without messages)",
+)
+
 
 @dataclass
 class RetryConfig:
@@ -1037,6 +1053,7 @@ class RBACKafkaConsumer:
 
                         # Consumer is alive and connected
                         self._update_health_status(True)
+                        last_poll_time.set(time.time())
                         logger.debug("Health check passed: consumer is connected and ready")
 
                     except Exception as e:
@@ -1634,8 +1651,9 @@ class RBACKafkaConsumer:
             else:
                 logger.debug(f"Offset {message.offset} stored, waiting for batch commit")
 
-            # Update activity timestamp
+            # Update activity timestamp and heartbeat metric
             self.last_activity = time.time()
+            last_message_processed_time.set(self.last_activity)
             return True  # Continue processing
         else:
             # Shutdown interrupted - InterruptedError
@@ -1727,6 +1745,9 @@ class RBACKafkaConsumer:
         last_committed_offsets = {}
 
         for message in self.consumer:
+            # Record poll activity — each iteration means a poll returned a message
+            last_poll_time.set(time.time())
+
             # Check if lock acquisition failed during rebalance
             if self.lock_acquisition_failed:
                 error_msg = (

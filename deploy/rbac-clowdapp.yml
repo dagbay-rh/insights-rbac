@@ -1504,6 +1504,95 @@ objects:
     selector:
       pod: rbac-postgres-exporter
     type: ClusterIP
+- apiVersion: monitoring.coreos.com/v1
+  kind: PrometheusRule
+  metadata:
+    name: rbac-kafka-consumer-alerts
+    labels:
+      prometheus: app-sre
+      role: alert-rules
+  spec:
+    groups:
+    - name: rbac-kafka-consumer.alerts
+      rules:
+      - alert: RBACKafkaConsumerInactive
+        expr: >
+          (time() - rbac_kafka_consumer_last_message_processed_timestamp_seconds) > 900
+          and rbac_kafka_consumer_info == 1
+        for: 5m
+        labels:
+          severity: warning
+          service: rbac
+          component: kafka-consumer
+        annotations:
+          summary: "RBAC Kafka consumer has not processed messages in 15+ minutes"
+          description: >
+            The RBAC Kafka consumer is running but has not successfully processed
+            any WAL replication messages for more than 15 minutes. This may indicate
+            the consumer is stuck, the topic is not receiving events, or message
+            processing is failing silently.
+      - alert: RBACKafkaConsumerDown
+        expr: >
+          min(rbac_kafka_consumer_info) == 0
+          or absent(rbac_kafka_consumer_info)
+        for: 5m
+        labels:
+          severity: critical
+          service: rbac
+          component: kafka-consumer
+        annotations:
+          summary: "RBAC Kafka consumer is not running"
+          description: >
+            The RBAC Kafka consumer process is not running or not reporting
+            metrics. WAL replication events are not being consumed, which will
+            cause Kessel Relations to fall out of sync with RBAC.
+      - alert: RBACKafkaConsumerPollStalled
+        expr: >
+          (time() - rbac_kafka_consumer_last_poll_timestamp_seconds) > 120
+          and rbac_kafka_consumer_info == 1
+        for: 2m
+        labels:
+          severity: critical
+          service: rbac
+          component: kafka-consumer
+        annotations:
+          summary: "RBAC Kafka consumer poll loop is stalled"
+          description: >
+            The RBAC Kafka consumer is reported as running but the poll loop
+            has not executed in over 2 minutes. The consumer process may be
+            deadlocked or blocked on a long-running operation.
+      - alert: RBACKafkaConsumerHighRetryRate
+        expr: >
+          sum(rate(rbac_kafka_consumer_retry_attempts_total[10m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          service: rbac
+          component: kafka-consumer
+        annotations:
+          summary: "RBAC Kafka consumer has elevated retry rate"
+          description: >
+            The RBAC Kafka consumer is retrying message processing at a rate
+            above 0.5/sec for the last 10 minutes. This may indicate transient
+            connectivity issues with Kessel Relations API or database problems.
+      - alert: RBACKafkaConsumerReplicationLag
+        expr: >
+          min_over_time(
+            (sum(rate(relations_replication_event_total[10m]))
+            - sum(rate(rbac_kafka_consumer_messages_processed_total{message_type="relations",status="success"}[10m]))
+            )[5m:1m]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          service: rbac
+          component: kafka-consumer
+        annotations:
+          summary: "RBAC Kafka consumer has sustained replication lag"
+          description: >
+            The rate of replication events being produced exceeds the rate of
+            successful consumer processing for over 10 minutes. The consumer
+            is falling behind, which will increase end-to-end replication latency.
+
 parameters:
 - description: Image name
   name: IMAGE

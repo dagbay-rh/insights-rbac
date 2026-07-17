@@ -51,6 +51,8 @@ from core.kafka_consumer import (
     RetryConfig,
     _save_consistency_token_best_effort,
     consistency_token_save_total,
+    last_message_processed_time,
+    last_poll_time,
 )
 from django.db import OperationalError
 from django.test import TestCase
@@ -2079,3 +2081,72 @@ class SaveConsistencyTokenBestEffortTests(TestCase):
         mock_tenant_objects.filter.return_value = mock_qs
 
         _save_consistency_token_best_effort("org-missing", "token-abc", "agg-1")
+
+
+class HeartbeatMetricTests(TestCase):
+    """Tests for consumer heartbeat metrics."""
+
+    @override_settings(RBAC_KAFKA_CONSUMER_TOPIC="test-topic")
+    def setUp(self):
+        """Set up test fixtures."""
+        self.consumer = RBACKafkaConsumer()
+        self.consumer.consumer = Mock()
+        self.consumer.offset_manager = Mock()
+        self.consumer.offset_manager.should_commit.return_value = False
+
+    @patch("core.kafka_consumer.relations_api_replication")
+    @patch("core.kafka_consumer.json_format.ParseDict")
+    def test_last_message_processed_time_updated_on_success(self, mock_parse_dict, mock_replication):
+        """Test that last_message_processed_time Gauge is updated after successful processing."""
+        import time
+
+        mock_response = Mock()
+        mock_response.consistency_token.token = "test-token"
+        mock_replication.write_relationships.return_value = mock_response
+        mock_replication.delete_relationships.return_value = mock_response
+
+        # Set lock token
+        self.consumer.lock_id = "test-group/0"
+        self.consumer.lock_token = "test-lock-token"
+
+        message = Mock()
+        message.partition = 0
+        message.offset = 1
+        message.value = json.dumps(
+            {
+                "schema": {},
+                "payload": json.dumps(
+                    {
+                        "aggregatetype": "relations",
+                        "aggregateid": "test-123",
+                        "type": "test_event",
+                        "relations_to_add": [{"resource": {}, "subject": {}}],
+                        "relations_to_remove": [],
+                        "resource_context": {"org_id": "org1", "event_type": "test"},
+                    }
+                ),
+            }
+        ).encode()
+        message.leader_epoch = 0
+
+        tp = Mock()
+
+        before = time.time()
+        message_value = json.loads(message.value.decode("utf-8"))
+        self.consumer._process_and_commit_message(message, message_value, tp, {})
+        after = time.time()
+
+        metric_value = last_message_processed_time._value.get()
+        self.assertGreaterEqual(metric_value, before)
+        self.assertLessEqual(metric_value, after)
+
+    def test_last_poll_time_gauge_exists(self):
+        """Test that the last_poll_time Gauge metric is properly defined."""
+        # Verify metric can be set without error
+        last_poll_time.set(1234567890.0)
+        self.assertEqual(last_poll_time._value.get(), 1234567890.0)
+
+    def test_last_message_processed_time_gauge_exists(self):
+        """Test that the last_message_processed_time Gauge metric is properly defined."""
+        last_message_processed_time.set(1234567890.0)
+        self.assertEqual(last_message_processed_time._value.get(), 1234567890.0)
