@@ -242,9 +242,20 @@ def tenant_view(request, org_id):
         tenant_obj = get_object_or_404(Tenant, org_id=org_id)
         with transaction.atomic():
             if tenant_is_unmodified(tenant_name=tenant_obj.tenant_name, org_id=org_id):
-                logger.warning(f"Deleting tenant {org_id}. Requested by {request.user.username}")
                 TENANTS.delete_tenant(org_id)
                 tenant_obj.delete()
+                # Admin action - SEC-MON-REQ-1 compliance (EOI-3 admin_action, EOI-1 pii_manipulation)
+                logger.info(
+                    f"Tenant {org_id} deleted. Requested by {request.user.username}",
+                    extra={
+                        "action": "DELETE",
+                        "resource_type": "tenant",
+                        "resource_id": org_id,
+                        "outcome": "success",
+                        "org_id": getattr(request.user, "org_id", None),
+                        "username": getattr(request.user, "username", None),
+                    },
+                )
                 return HttpResponse(status=204)
             else:
                 return HttpResponse("Tenant cannot be deleted.", status=400)
@@ -257,7 +268,17 @@ def run_migrations(request):
     POST /_private/api/migrations/run/
     """
     if request.method == "POST":
-        logger.info(f"Running migrations: {request.method} {request.user.username}")
+        # Admin action - SEC-MON-REQ-1 compliance (EOI-3 admin_action, EOI-2 system_object_manipulation)
+        logger.info(
+            "Internal API: Run migrations triggered",
+            extra={
+                "action": "MIGRATE",
+                "resource_type": "database",
+                "outcome": "in_progress",
+                "org_id": getattr(request.user, "org_id", None),
+                "username": getattr(request.user, "username", None),
+            },
+        )
         run_migrations_in_worker.delay()
         return HttpResponse("Migrations are running in a background worker.", status=202)
     return HttpResponse('Invalid method, only "POST" is allowed.', status=405)
@@ -633,7 +654,17 @@ def run_seeds(request):
                 f"{force_create_option} and {force_update_option} cannot both be set to true.", status=400
             )
 
-        logger.info(f"Running seeds: {request.method} {request.user.username}")
+        # Admin action - SEC-MON-REQ-1 compliance (EOI-3 admin_action, EOI-2 system_object_manipulation)
+        logger.info(
+            "Internal API: Run seeds triggered",
+            extra={
+                "action": "SEED",
+                "resource_type": "permissions_roles_groups",
+                "outcome": "in_progress",
+                "org_id": getattr(request.user, "org_id", None),
+                "username": getattr(request.user, "username", None),
+            },
+        )
         run_seeds_in_worker.delay(args)
 
         return HttpResponse("Seeds are running in a background worker.", status=202)
@@ -708,6 +739,18 @@ def set_tenant_ready(request):
                     status=400,
                 )
             tenant_qs.update(ready=True)
+            # Admin action - SEC-MON-REQ-1 compliance (EOI-3 admin_action, EOI-2 system_object_manipulation)
+            logger.info(
+                "Internal API: Tenant ready flag updated",
+                extra={
+                    "action": "UPDATE",
+                    "resource_type": "tenant",
+                    "outcome": "success",
+                    "org_id": getattr(request.user, "org_id", None),
+                    "username": getattr(request.user, "username", None),
+                    "count": prev_count,
+                },
+            )
             return HttpResponse(
                 f"Total of {prev_count} tenants has been updated. "
                 f"{tenant_qs.count()} tenant with ready flag equal to false.",
@@ -793,7 +836,7 @@ def populate_tenant_org_id_view(request):
         except Exception as e:
             logger.error(f"Error populating tenant org_id: {str(e)}")
             return JsonResponse(
-                {"error": f"Error processing request: {str(e)}"},
+                {"error": "Error processing request"},
                 status=500,
             )
 
@@ -851,12 +894,37 @@ def role_removal(request):
         role_obj = get_object_or_404(Role, name=role_name, tenant=Tenant.objects.get(tenant_name="public"))
         with transaction.atomic():
             try:
-                logger.warning(f"Deleting role '{role_name}'. Requested by '{request.user.username}'")
                 dual_write_handler = SeedingRelationApiDualWriteHandler(role_obj)
                 dual_write_handler.replicate_deleted_system_role()
                 role_obj.delete()
+                # Admin action - SEC-MON-REQ-1 compliance (EOI-3 admin_action, EOI-2 system_object_manipulation)
+                logger.info(
+                    f"System role '{role_name}' deleted. Requested by '{request.user.username}'",
+                    extra={
+                        "action": "DELETE",
+                        "resource_type": "role",
+                        "resource_id": role_name,
+                        "outcome": "success",
+                        "org_id": getattr(request.user, "org_id", None),
+                        "username": getattr(request.user, "username", None),
+                    },
+                )
                 return HttpResponse(f"Role '{role_name}' deleted.", status=204)
             except Exception:
+                # Admin action - SEC-MON-REQ-1 compliance (EOI-3 admin_action, EOI-11 warnings_or_errors)
+                logger.error(
+                    "System role deletion failed",
+                    extra={
+                        "action": "DELETE",
+                        "resource_type": "role",
+                        "resource_id": role_name,
+                        "outcome": "failure",
+                        "org_id": getattr(request.user, "org_id", None),
+                        "username": getattr(request.user, "username", None),
+                        "reason": "deletion_error",
+                    },
+                    exc_info=True,
+                )
                 return HttpResponse("Role cannot be deleted.", status=400)
     return HttpResponse('Invalid method, only "DELETE" is allowed.', status=405)
 
@@ -882,11 +950,36 @@ def permission_removal(request):
         permission_obj = get_object_or_404(Permission, permission=permission)
         with transaction.atomic():
             try:
-                logger.warning(f"Deleting permission '{permission}'. Requested by '{request.user.username}'")
                 delete_permission(permission_obj)
+                # Admin action - SEC-MON-REQ-1 compliance (EOI-3 admin_action, EOI-2 system_object_manipulation)
+                logger.info(
+                    f"System permission '{permission}' deleted. Requested by '{request.user.username}'",
+                    extra={
+                        "action": "DELETE",
+                        "resource_type": "permission",
+                        "resource_id": permission,
+                        "outcome": "success",
+                        "org_id": getattr(request.user, "org_id", None),
+                        "username": getattr(request.user, "username", None),
+                    },
+                )
                 return HttpResponse(f"Permission '{permission}' deleted.", status=204)
-            except Exception as e:
-                return HttpResponse(f"Permission cannot be deleted. {str(e)}", status=400)
+            except Exception:
+                # Admin action - SEC-MON-REQ-1 compliance (EOI-3 admin_action, EOI-11 warnings_or_errors)
+                logger.error(
+                    "System permission deletion failed",
+                    extra={
+                        "action": "DELETE",
+                        "resource_type": "permission",
+                        "resource_id": permission,
+                        "outcome": "failure",
+                        "org_id": getattr(request.user, "org_id", None),
+                        "username": getattr(request.user, "username", None),
+                        "reason": "deletion_error",
+                    },
+                    exc_info=True,
+                )
+                return HttpResponse("Permission cannot be deleted.", status=400)
     return HttpResponse('Invalid method, only "DELETE" is allowed.', status=405)
 
 
@@ -931,6 +1024,18 @@ def data_migration(request):
         "write_relationships": request.GET.get("write_relationships", "False"),
         "skip_roles": request.GET.get("skip_roles", "False").lower() == "true",
     }
+    # Admin action - SEC-MON-REQ-1 compliance (EOI-3 admin_action, EOI-2 system_object_manipulation)
+    logger.info(
+        "Internal API: Data migration triggered",
+        extra={
+            "action": "MIGRATE",
+            "resource_type": "database",
+            "outcome": "in_progress",
+            "org_id": getattr(request.user, "org_id", None),
+            "username": getattr(request.user, "username", None),
+            "target_orgs": args.get("orgs"),
+        },
+    )
     migrate_data_in_worker.delay(args)
     return HttpResponse("Data migration from V1 to V2 are running in a background worker.", status=202)
 
@@ -1058,6 +1163,19 @@ def bootstrap_tenant(request):
         for org_id in org_ids:
             tenant = get_object_or_404(Tenant, org_id=org_id)
             bootstrap_service.bootstrap_tenant(tenant, force=force)
+    # Admin action - SEC-MON-REQ-1 compliance (EOI-3 admin_action, EOI-2 system_object_manipulation)
+    logger.info(
+        "Internal API: Tenant bootstrap completed",
+        extra={
+            "action": "CREATE",
+            "resource_type": "tenant",
+            "outcome": "success",
+            "org_id": getattr(request.user, "org_id", None),
+            "username": getattr(request.user, "username", None),
+            "target_org_ids": org_ids,
+            "force": force,
+        },
+    )
     return HttpResponse(f"Bootstrapping tenants with org_ids {org_ids} were finished.", status=200)
 
 
@@ -1285,6 +1403,21 @@ def reset_imported_tenants(request: HttpRequest) -> HttpResponse:
             return HttpResponse("Destructive operations disallowed.", status=400)
 
         run_reset_imported_tenants.delay({"query": query, "limit": limit, "excluded": excluded})
+
+        # Admin action - SEC-MON-REQ-1 compliance (EOI-3 admin_action, EOI-1 pii_manipulation)
+        logger.info(
+            "Bulk tenant deletion initiated",
+            extra={
+                "action": "DELETE",
+                "resource_type": "tenant",
+                "resource_id": f"bulk_deletion_limit_{limit}",
+                "outcome": "in_progress",
+                "org_id": getattr(request.user, "org_id", None),
+                "username": getattr(request.user, "username", None),
+                "limit": limit,
+                "excluded_count": len(excluded) if excluded else 0,
+            },
+        )
 
         return HttpResponse("Tenants deleting in worker.", status=200)
 
@@ -2449,7 +2582,19 @@ def cleanup_tenant_orphan_bindings(request, org_id):
             status=404,
         )
 
-    logger.info(f"Queuing cleanup task for tenant {org_id} (dry_run={dry_run})")
+    # Admin action - SEC-MON-REQ-1 compliance (EOI-3 admin_action, EOI-1 pii_manipulation)
+    logger.info(
+        "Internal API: Cleanup tenant orphan bindings triggered",
+        extra={
+            "action": "CLEANUP",
+            "resource_type": "role_binding",
+            "outcome": "in_progress",
+            "org_id": getattr(request.user, "org_id", None),
+            "username": getattr(request.user, "username", None),
+            "target_org_id": org_id,
+            "dry_run": dry_run,
+        },
+    )
 
     # Queue the task
     cleanup_tenant_orphan_bindings_in_worker.delay(org_id=org_id, dry_run=dry_run)
@@ -2521,7 +2666,19 @@ def rebuild_tenant_workspace_relations(request, org_id):
             status=404,
         )
 
-    logger.info(f"Rebuilding workspace relations for tenant {org_id} (dry_run={dry_run})")
+    # Admin action - SEC-MON-REQ-1 compliance (EOI-3 admin_action, EOI-2 system_object_manipulation)
+    logger.info(
+        "Internal API: Rebuild tenant workspace relations",
+        extra={
+            "action": "REBUILD",
+            "resource_type": "workspace",
+            "outcome": "in_progress",
+            "org_id": getattr(request.user, "org_id", None),
+            "username": getattr(request.user, "username", None),
+            "target_org_id": org_id,
+            "dry_run": dry_run,
+        },
+    )
 
     # Create a read_tuples function that wraps the internal read_tuples_from_kessel
     def read_tuples_fn(resource_type, resource_id, relation, subject_type="", subject_id=""):
@@ -2541,6 +2698,18 @@ def rebuild_tenant_workspace_relations(request, org_id):
             read_tuples_fn=read_tuples_fn,
             replicator=replicator,
             dry_run=dry_run,
+        )
+        # Admin action - SEC-MON-REQ-1 compliance (EOI-3 admin_action, EOI-2 system_object_manipulation)
+        logger.info(
+            "Internal API: Rebuild tenant workspace relations completed",
+            extra={
+                "action": "REBUILD",
+                "resource_type": "workspace",
+                "outcome": "success",
+                "org_id": getattr(request.user, "org_id", None),
+                "username": getattr(request.user, "username", None),
+                "target_org_id": org_id,
+            },
         )
         return JsonResponse(result, status=200)
     except Exception as e:
