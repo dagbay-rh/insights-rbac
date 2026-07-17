@@ -2335,12 +2335,230 @@ data:
           "type": "timeseries"
         },
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 300
+                  },
+                  {
+                    "color": "red",
+                    "value": 900
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 8,
+            "x": 0,
+            "y": 71
+          },
+          "id": 147,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "time() - rbac_kafka_consumer_last_message_processed_timestamp_seconds",
+              "legendFormat": "Time since last message",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Consumer Heartbeat: Time Since Last Message",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 60
+                  },
+                  {
+                    "color": "red",
+                    "value": 120
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 8,
+            "x": 8,
+            "y": 71
+          },
+          "id": 148,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "time() - rbac_kafka_consumer_last_poll_timestamp_seconds",
+              "legendFormat": "Time since last poll",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Consumer Heartbeat: Time Since Last Poll",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "DOWN"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "UP"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 8,
+            "x": 16,
+            "y": 71
+          },
+          "id": 149,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "min(rbac_kafka_consumer_info)",
+              "legendFormat": "Consumer Status",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Consumer Status",
+          "type": "stat"
+        },
+        {
           "collapsed": true,
           "gridPos": {
             "h": 1,
             "w": 24,
             "x": 0,
-            "y": 71
+            "y": 76
           },
           "id": 45,
           "panels": [
@@ -2820,7 +3038,7 @@ data:
             "h": 1,
             "w": 24,
             "x": 0,
-            "y": 72
+            "y": 77
           },
           "id": 27,
           "panels": [
@@ -3340,7 +3558,7 @@ data:
             "h": 1,
             "w": 24,
             "x": 0,
-            "y": 73
+            "y": 78
           },
           "id": 23,
           "panels": [
@@ -4006,7 +4224,7 @@ data:
             "h": 1,
             "w": 24,
             "x": 0,
-            "y": 74
+            "y": 79
           },
           "id": 21,
           "panels": [
@@ -4292,7 +4510,7 @@ data:
             "h": 1,
             "w": 24,
             "x": 0,
-            "y": 75
+            "y": 80
           },
           "id": 29,
           "panels": [
@@ -4753,7 +4971,7 @@ data:
             "h": 1,
             "w": 24,
             "x": 0,
-            "y": 76
+            "y": 81
           },
           "id": 74,
           "panels": [
@@ -5252,7 +5470,7 @@ data:
             "h": 1,
             "w": 24,
             "x": 0,
-            "y": 77
+            "y": 82
           },
           "id": 75,
           "panels": [
@@ -5548,7 +5766,7 @@ data:
             "h": 1,
             "w": 24,
             "x": 0,
-            "y": 78
+            "y": 83
           },
           "id": 57,
           "panels": [
@@ -6379,7 +6597,7 @@ data:
             "h": 1,
             "w": 24,
             "x": 0,
-            "y": 79
+            "y": 84
           },
           "id": 141,
           "panels": [
