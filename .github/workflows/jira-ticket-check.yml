@@ -16,9 +16,7 @@ jobs:
   jira-ticket-check:
     runs-on: ubuntu-latest
     if: >-
-      !contains(github.event.pull_request.labels.*.name, 'bot') &&
-      (github.event.action == 'opened' ||
-      github.event.changes.title.from != '')
+      !contains(github.event.pull_request.labels.*.name, 'bot')
     steps:
       - name: Check PR title for JIRA ticket
         env:
