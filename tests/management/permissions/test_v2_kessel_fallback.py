@@ -226,6 +226,7 @@ class PrincipalAccessV2FallbackTest(TestCase):
         """V2 user should be denied when Kessel denies."""
         req = _make_v2_request()
         self.assertFalse(PrincipalAccessPermission().has_permission(req, None))
+        mock_kessel.assert_called_once_with(req)
 
     @patch(_PATCH_PRINCIPAL, return_value=True)
     def test_non_get_not_affected(self, mock_kessel):
@@ -263,6 +264,14 @@ class PermissionAccessV2FallbackTest(TestCase):
         """V2 user should be denied when Kessel denies."""
         req = _make_v2_request()
         self.assertFalse(PermissionAccessPermission().has_permission(req, None))
+        mock_kessel.assert_called_once_with(req)
+
+    @patch(_PATCH_PERMISSION, return_value=True)
+    def test_write_not_affected(self, mock_kessel):
+        """Write operations should not trigger Kessel fallback."""
+        req = _make_v2_request(method="POST")
+        self.assertFalse(PermissionAccessPermission().has_permission(req, None))
+        mock_kessel.assert_not_called()
 
 
 class RoleAccessV2FallbackTest(TestCase):
@@ -293,6 +302,7 @@ class RoleAccessV2FallbackTest(TestCase):
         """V2 user should be denied when Kessel denies."""
         req = _make_v2_request(query_params={})
         self.assertFalse(RoleAccessPermission().has_permission(req, None))
+        mock_kessel.assert_called_once_with(req)
 
     def test_system_param_bypass_unchanged(self):
         """System roles query should still bypass access checks."""
@@ -354,6 +364,7 @@ class GroupAccessV2FallbackTest(TestCase):
         """V2 user should be denied when Kessel denies."""
         req = _make_v2_request()
         self.assertFalse(GroupAccessPermission().has_permission(req, self.view))
+        mock_kessel.assert_called_once_with(req)
 
     def test_own_groups_bypass_unchanged(self):
         """Users querying their own groups should still be allowed."""
