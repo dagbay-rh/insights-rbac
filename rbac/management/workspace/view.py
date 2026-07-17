@@ -231,13 +231,37 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
         super().perform_create(serializer)
         workspace = serializer.instance
         self._log_audit(self.request, AuditLog.CREATE, workspace, f"Created workspace: {workspace.name}")
+        # CREATE operation - SEC-MON-REQ-1 compliance (EOI-1 pii_manipulation)
+        logger.info(
+            "Workspace created",
+            extra={
+                "action": "CREATE",
+                "resource_type": "workspace",
+                "resource_id": str(workspace.id),
+                "outcome": "success",
+                "org_id": getattr(self.request.user, "org_id", None),
+                "username": getattr(self.request.user, "username", None),
+            },
+        )
 
     def create(self, request, *args, **kwargs):
         """Create a Workspace."""
         try:
             return self._create_atomic(request, *args, **kwargs)
         except TimeoutError as e:
-            logger.exception("TimeoutError in workspace creation operation")
+            # Failed operation - SEC-MON-REQ-1 compliance (EOI-11 warnings_or_errors, EOI-1 pii_manipulation)
+            logger.error(
+                "Workspace creation failed: TimeoutError",
+                extra={
+                    "action": "CREATE",
+                    "resource_type": "workspace",
+                    "outcome": "failure",
+                    "reason": "timeout",
+                    "org_id": getattr(request.user, "org_id", None),
+                    "username": getattr(request.user, "username", None),
+                },
+                exc_info=True,
+            )
             return Response(
                 {"detail": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -394,8 +418,21 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
 
     def perform_destroy(self, instance):
         """Delegate to service for destroy logic and log audit entry."""
+        workspace_id = str(instance.id)
         self._service.destroy(instance)
         self._log_audit(self.request, AuditLog.DELETE, instance, f"Deleted workspace: {instance.name}")
+        # DELETE operation - SEC-MON-REQ-1 compliance (EOI-1 pii_manipulation)
+        logger.info(
+            "Workspace deleted",
+            extra={
+                "action": "DELETE",
+                "resource_type": "workspace",
+                "resource_id": workspace_id,
+                "outcome": "success",
+                "org_id": getattr(self.request.user, "org_id", None),
+                "username": getattr(self.request.user, "username", None),
+            },
+        )
 
     def perform_update(self, serializer):
         """Update workspace and log audit entry.
@@ -415,6 +452,18 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
         )
         super().perform_update(serializer)
         self._log_audit(self.request, AuditLog.EDIT, instance, description)
+        # UPDATE operation - SEC-MON-REQ-1 compliance (EOI-1 pii_manipulation)
+        logger.info(
+            "Workspace updated",
+            extra={
+                "action": "UPDATE",
+                "resource_type": "workspace",
+                "resource_id": str(instance.id),
+                "outcome": "success",
+                "org_id": getattr(self.request.user, "org_id", None),
+                "username": getattr(self.request.user, "username", None),
+            },
+        )
 
         if instance.type in (Workspace.Types.ROOT, Workspace.Types.DEFAULT):
             org_id = self._get_org_id(self.request)
@@ -450,6 +499,19 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
             AuditLog.EDIT,
             workspace,
             f"Moved workspace: {workspace.name} to parent {workspace.parent.name}",
+        )
+        # MOVE operation - SEC-MON-REQ-1 compliance (EOI-1 pii_manipulation)
+        logger.info(
+            "Workspace moved",
+            extra={
+                "action": "MOVE",
+                "resource_type": "workspace",
+                "resource_id": str(workspace.id),
+                "outcome": "success",
+                "org_id": getattr(request.user, "org_id", None),
+                "username": getattr(request.user, "username", None),
+                "target_parent_id": str(target_workspace_id),
+            },
         )
         return result
 
@@ -496,10 +558,20 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
         ws_context = f", ws_id='{ws_id}'" if ws_id else ""
         if hasattr(error, "__cause__"):
             if isinstance(error.__cause__, SerializationFailure):
+                # Failed operation - SEC-MON-REQ-1 compliance (EOI-11 warnings_or_errors)
                 logger.error(
                     "SerializationFailure in workspace %s operation after all retries exhausted%s",
                     operation,
                     ws_context,
+                    extra={
+                        "action": operation.upper(),
+                        "resource_type": "workspace",
+                        "resource_id": ws_id if ws_id else "unknown",
+                        "outcome": "failure",
+                        "reason": "serialization_failure",
+                        "org_id": getattr(self.request.user, "org_id", None),
+                        "username": getattr(self.request.user, "username", None),
+                    },
                 )
                 response = Response(
                     {
@@ -511,10 +583,20 @@ class WorkspaceViewSet(WorkspaceObjectAccessMixin, BaseV2ViewSet):
                 response["Retry-After"] = "1"
                 return response
             elif isinstance(error.__cause__, DeadlockDetected):
+                # Failed operation - SEC-MON-REQ-1 compliance (EOI-11 warnings_or_errors)
                 logger.error(
                     "DeadlockDetected in workspace %s operation after all retries exhausted%s",
                     operation,
                     ws_context,
+                    extra={
+                        "action": operation.upper(),
+                        "resource_type": "workspace",
+                        "resource_id": ws_id if ws_id else "unknown",
+                        "outcome": "failure",
+                        "reason": "deadlock_detected",
+                        "org_id": getattr(self.request.user, "org_id", None),
+                        "username": getattr(self.request.user, "username", None),
+                    },
                 )
                 return Response(
                     {"detail": "Internal server error in concurrent updates. Please try again later."},

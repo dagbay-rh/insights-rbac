@@ -148,8 +148,31 @@ class Command(BaseCommand):
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
-        logger.info(f"Received signal {signum}, shutting down gracefully...")
-        self._cleanup()
+        # Graceful shutdown - SEC-MON-REQ-1 compliance (EOI-5 process_status)
+        logger.info(
+            f"Received signal {signum}, shutting down gracefully...",
+            extra={
+                "action": "SHUTDOWN",
+                "resource_type": "kafka_consumer",
+                "outcome": "in_progress",
+                "principal": "system:kafka:consumer",
+                "signal": signum,
+            },
+        )
+        try:
+            self._cleanup()
+        except Exception:
+            logger.exception("Error during Kafka consumer cleanup")
+        # Graceful shutdown - SEC-MON-REQ-1 compliance (EOI-5 process_status)
+        logger.info(
+            "Kafka consumer shutdown complete",
+            extra={
+                "action": "SHUTDOWN",
+                "resource_type": "kafka_consumer",
+                "outcome": "success",
+                "principal": "system:kafka:consumer",
+            },
+        )
         sys.exit(0)
 
     def _cleanup(self):
