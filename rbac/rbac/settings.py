@@ -246,13 +246,14 @@ def _parse_logging_handlers(raw_value):
     """Parse comma-separated handler names, strip whitespace, and deduplicate.
 
     'console' and 'ecs' both write to stderr.  Having both produces duplicate
-    log lines for every event.  When both are specified, keep only 'ecs'
-    (structured JSON for CloudWatch / log aggregation).
-    Use DJANGO_LOG_HANDLERS=console for plain-text development output.
+    log lines for every event.  When both are specified, keep only 'console'
+    (plain text for pod stdout / ``oc logs``).  CloudWatch receives structured
+    JSON via the separate watchtower handler, which always uses ecs_formatter.
+    Use DJANGO_LOG_HANDLERS=ecs to force JSON on stdout (e.g. for local testing).
     """
     handlers = [h.strip() for h in raw_value.split(",") if h.strip()]
     if "console" in handlers and "ecs" in handlers:
-        handlers = [h for h in handlers if h != "console"]
+        handlers = [h for h in handlers if h != "ecs"]
     return handlers
 
 
@@ -328,13 +329,16 @@ if CW_AWS_ACCESS_KEY_ID:
         aws_secret_access_key=CW_AWS_SECRET_ACCESS_KEY,
     )
 
+    # Formatter is hardcoded to ecs_formatter so CloudWatch always receives
+    # structured JSON, regardless of the DJANGO_LOG_FORMATTER env var which
+    # only controls the stdout/console handler format.
     WATCHTOWER_HANDLER = {
         "level": RBAC_LOGGING_LEVEL,
         "class": "watchtower.CloudWatchLogHandler",
         "boto3_client": boto3_logs_client,
         "log_group_name": CW_LOG_GROUP,
         "stream_name": CW_STREAM_NAME,
-        "formatter": LOGGING_FORMATTER,
+        "formatter": "ecs_formatter",
         "use_queues": True,
         "create_log_group": CW_CREATE_LOG_GROUP,
         "filters": ["env_name"],
