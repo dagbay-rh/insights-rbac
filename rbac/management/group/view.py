@@ -325,6 +325,19 @@ class GroupViewSet(
                 if status.is_success(create_group.status_code):
                     auditlog = AuditLog()
                     auditlog.log_create(request, AuditLog.GROUP)
+                    # CREATE operation - SEC-MON-REQ-1 compliance (EOI-1 pii_manipulation)
+                    group_uuid = create_group.data.get("uuid") if hasattr(create_group, "data") else None
+                    logger.info(
+                        "Group created",
+                        extra={
+                            "action": "CREATE",
+                            "resource_type": "group",
+                            "resource_id": str(group_uuid) if group_uuid else "unknown",
+                            "outcome": "success",
+                            "org_id": getattr(request.user, "org_id", None),
+                            "username": getattr(request.user, "username", None),
+                        },
+                    )
         except IntegrityError as e:
             if "unique constraint" in str(e.args):
                 raise serializers.ValidationError(
@@ -334,24 +347,6 @@ class GroupViewSet(
                 raise serializers.ValidationError(
                     {"group": "Unknown Integrity Error occurred while trying to add group for this tenant"}
                 )
-
-        if status.is_success(create_group.status_code):
-            auditlog = AuditLog()
-            auditlog.log_create(request, AuditLog.GROUP)
-            # CREATE operation - SEC-MON-REQ-1 compliance (EOI-1 pii_manipulation)
-            # Extract group UUID from response data
-            group_uuid = create_group.data.get("uuid") if hasattr(create_group, "data") else None
-            logger.info(
-                "Group created",
-                extra={
-                    "action": "CREATE",
-                    "resource_type": "group",
-                    "resource_id": str(group_uuid) if group_uuid else "unknown",
-                    "outcome": "success",
-                    "org_id": getattr(request.user, "org_id", None),
-                    "username": getattr(request.user, "username", None),
-                },
-            )
 
         return create_group
 
@@ -486,6 +481,18 @@ class GroupViewSet(
             if response.status_code == status.HTTP_204_NO_CONTENT:
                 auditlog = AuditLog()
                 auditlog.log_delete(request, AuditLog.GROUP, group)
+                # DELETE operation - SEC-MON-REQ-1 compliance (EOI-1 pii_manipulation)
+                logger.info(
+                    "Group deleted",
+                    extra={
+                        "action": "DELETE",
+                        "resource_type": "group",
+                        "resource_id": str(group.uuid),
+                        "outcome": "success",
+                        "org_id": getattr(request.user, "org_id", None),
+                        "username": getattr(request.user, "username", None),
+                    },
+                )
 
             # Restore USER default role bindings if custom default group was deleted
             if is_custom_default_group:
@@ -496,21 +503,6 @@ class GroupViewSet(
         # to avoid sending notifications that could be rolled back.
         if response.status_code == status.HTTP_204_NO_CONTENT:
             group_obj_change_notification_handler(request.user, group, "deleted")
-
-            auditlog = AuditLog()
-            auditlog.log_delete(request, AuditLog.GROUP, group)
-            # DELETE operation - SEC-MON-REQ-1 compliance (EOI-1 pii_manipulation)
-            logger.info(
-                "Group deleted",
-                extra={
-                    "action": "DELETE",
-                    "resource_type": "group",
-                    "resource_id": str(group.uuid),
-                    "outcome": "success",
-                    "org_id": getattr(request.user, "org_id", None),
-                    "username": getattr(request.user, "username", None),
-                },
-            )
         return response
 
     def update(self, request, *args, **kwargs):

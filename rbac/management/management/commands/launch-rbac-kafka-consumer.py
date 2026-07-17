@@ -159,9 +159,11 @@ class Command(BaseCommand):
                 "signal": signum,
             },
         )
+        cleanup_outcome = "success"
         try:
             self._cleanup()
         except Exception:
+            cleanup_outcome = "failure"
             logger.exception("Error during Kafka consumer cleanup")
         # Graceful shutdown - SEC-MON-REQ-1 compliance (EOI-5 process_status)
         logger.info(
@@ -169,7 +171,7 @@ class Command(BaseCommand):
             extra={
                 "action": "SHUTDOWN",
                 "resource_type": "kafka_consumer",
-                "outcome": "success",
+                "outcome": cleanup_outcome,
                 "principal": "system:kafka:consumer",
             },
         )
