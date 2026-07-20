@@ -391,8 +391,11 @@ def is_user_allowed_v2(request, required_operation, target_workspace, with_ances
                             top_level_workspaces = filter_top_level_workspaces(accessible_workspaces)
 
                         with record_timing(timings, "add_ancestor_ids"):
-                            for workspace in top_level_workspaces:
-                                ancestor_ids = {str(ancestor.id) for ancestor in workspace.ancestors()}
+                            top_level_ids = list(top_level_workspaces.values_list("id", flat=True))
+                            if top_level_ids:
+                                ancestor_ids = Workspace.objects.ancestor_ids_for_workspaces(
+                                    top_level_ids, request.tenant.id
+                                )
                                 accessible_workspace_ids.update(ancestor_ids)
             elif with_ancestry:
                 with record_timing(timings, "get_fallback_workspace_ids"):
