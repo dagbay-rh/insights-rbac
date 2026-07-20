@@ -273,6 +273,18 @@ class IdentityHeaderMiddleware:
                 if _is_a2s_path(request):
                     return self.get_response(request)
                 logger.debug("x-rh-identity does not contain user_info or service_account keys: %s", json_rh_auth)
+                # Authentication failure - SEC-MON-REQ-1 compliance (EOI-7 invalid_login)
+                logger.warning(
+                    "Authentication failed",
+                    extra={
+                        "action": "AUTHENTICATE",
+                        "resource_type": "session",
+                        "auth_method": "x-rh-identity",
+                        "outcome": "failure",
+                        "reason": "missing_user_info_and_service_account",
+                        "endpoint": request.path,
+                    },
+                )
                 return HttpResponseUnauthorizedRequest()
 
             # The service accounts must provide their client IDs for us to keep processing the request.
@@ -310,7 +322,18 @@ class IdentityHeaderMiddleware:
                 cross_account = internal.get("cross_access", False)
                 if cross_account:
                     if not (user.internal and user_info.get("email").endswith("@redhat.com")):
-                        logger.error("Cross account request permission denied. Requester is not internal user.")
+                        # Authentication failure - SEC-MON-REQ-1 compliance (EOI-7 invalid_login)
+                        logger.warning(
+                            "Authentication failed: cross account request denied, requester is not internal user",
+                            extra={
+                                "action": "AUTHENTICATE",
+                                "resource_type": "session",
+                                "auth_method": "x-rh-identity",
+                                "outcome": "failure",
+                                "reason": "cross_account_not_internal_user",
+                                "endpoint": request.path,
+                            },
+                        )
                         return HttpResponseUnauthorizedRequest()
                     user.username = f"{user.org_id}-{user.user_id}"
         except (KeyError, TypeError, JSONDecodeError):
@@ -320,7 +343,18 @@ class IdentityHeaderMiddleware:
                 request, token_validator=self.token_validator
             )
             if not user:
-                logger.error("Could not obtain identity on request.")
+                # Authentication failure - SEC-MON-REQ-1 compliance (EOI-7 invalid_login)
+                logger.warning(
+                    "Authentication failed: could not obtain identity on request",
+                    extra={
+                        "action": "AUTHENTICATE",
+                        "resource_type": "session",
+                        "auth_method": "x-rh-identity_fallback",
+                        "outcome": "failure",
+                        "reason": "identity_header_parse_failed",
+                        "endpoint": request.path,
+                    },
+                )
                 return HttpResponseUnauthorizedRequest()
         except binascii.Error as error:
             logger.error("Could not decode header: %s.", error)
